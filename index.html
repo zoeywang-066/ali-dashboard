@@ -135,7 +135,7 @@ canvas{max-height:340px}
 
 <div class="header">
   <h1>AliExpress Moloco 投放数据看板</h1>
-  <div class="meta">数据更新: 2026-05-18 15:44</div>
+  <div class="meta">数据更新: 2026-05-18 15:48</div>
 </div>
 
 <div class="topbar">
@@ -228,10 +228,10 @@ canvas{max-height:340px}
     <button class="spbtn active" id="dac-btn-3"  onclick="setDacPeriod(3)">近3天</button>
     <button class="spbtn"        id="dac-btn-7"  onclick="setDacPeriod(7)">近7天</button>
     <button class="spbtn"        id="dac-btn-14" onclick="setDacPeriod(14)">近14天</button>
-    <span style="font-size:12px;color:#94a3b8;margin-left:4px">数据源：最新 sheet · session_dac</span>
+    <span style="font-size:12px;color:#94a3b8;margin-left:4px">数据源：最新 sheet · dac成本字段（24h_dac口径）</span>
   </div>
   <div class="section-title">
-    各国 DAC成本（花费 / session_dac，窗口合计）
+    各国 DAC成本（窗口合计）
     <span id="clear-dac-country" class="clear-btn" style="display:none" onclick="selectDacCountry(null)">✕ 清除</span>
   </div>
   <div id="dac-country-cards" class="cards"></div>
@@ -569,9 +569,9 @@ function renderDac() {
   area.innerHTML = `
     <div class="chart-box">
       <div class="chart-hd">${selDacCountry} — DAC成本日趋势
-        <span class="badge">花费 / session_dac</span></div>
+        <span class="badge">dac成本字段 · 24h_dac口径</span></div>
       <canvas id="dacTrendChart"></canvas>
-      <div class="note">DAC成本 = 当日花费 ÷ 当日 session_dac 汇总</div>
+      <div class="note">数据来源：dac成本字段（costdsp / 24h_dac）</div>
     </div>
     <div class="chart-box">
       <div class="chart-hd">${selDacCountry} — Campaign DAC成本
@@ -651,7 +651,15 @@ function renderDac() {
           const v = ctx.parsed.y;
           return v != null ? ctx.dataset.label + ': $' + v : null;
         } } },
-        datalabels: { display: false },
+        datalabels: {
+          display: true,
+          formatter: v => v != null ? '$' + v : null,
+          color: ctx => ctx.dataset.borderColor || '#333',
+          font: { size: 10, weight: '700' },
+          anchor: 'top', align: 'top', offset: 2,
+          backgroundColor: 'rgba(255,255,255,0.82)', borderRadius: 3,
+          padding: { top: 1, bottom: 1, left: 3, right: 3 },
+        },
       },
     },
   });
