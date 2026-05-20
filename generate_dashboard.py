@@ -14,12 +14,24 @@ from collections import defaultdict
 from pathlib import Path
 
 DESKTOP      = Path.home() / "Desktop"
-REPO_DIR     = DESKTOP / "ali-dashboard"
+DOWNLOADS    = Path.home() / "Downloads"
+REPO_DIR     = Path.home() / "ali-dashboard"
 OUTPUT_FILE  = str(REPO_DIR / "index.html")
-XLSX_FILE    = DESKTOP / "阿里投放数据.xlsx"
+XLSX_FILE    = DOWNLOADS / "aliexpress_moloco_compaign_data.xlsx"
 CSV_FILE     = DESKTOP / "阿里投放数据.csv"
 NUMBERS_FILE = DESKTOP / "阿里投放数据.numbers"
 SHEET_NAME   = "最新"
+
+# ─── 数据过滤 ────────────────────────────────────────────────────────────────
+def is_other_channel(name):
+    """剔除其他渠道（criteo）和脏数据行。保留 copy of * 等仍属 Moloco 数据的项。"""
+    if not name:
+        return True
+    if name in ("campaign_name", "campaign_namedsp"):
+        return True
+    if "criteo" in name.lower():
+        return True
+    return False
 
 # ─── 分类 & 名称 ─────────────────────────────────────────────────────────────
 def classify(name):
@@ -43,30 +55,80 @@ def short_name(name):
 def load_data():
     # 优先读取 xlsx，其次 csv，最后回落到 Numbers
     if XLSX_FILE.exists():
-        return _load_xlsx(XLSX_FILE)
+        records = _load_xlsx(XLSX_FILE)
     elif CSV_FILE.exists():
-        return _load_csv(CSV_FILE)
+        records = _load_csv(CSV_FILE)
     elif NUMBERS_FILE.exists():
-        return _load_numbers(NUMBERS_FILE)
+        records = _load_numbers(NUMBERS_FILE)
     else:
         print(f"错误：找不到数据文件\n  {XLSX_FILE}\n  {CSV_FILE}\n  {NUMBERS_FILE}")
         sys.exit(1)
 
+    before = len(records)
+    excluded = {r["name"] for r in records if is_other_channel(r["name"])}
+    records = [r for r in records if not is_other_channel(r["name"])]
+    if excluded:
+        print(f"  过滤其他渠道(criteo)+脏数据: -{before - len(records)} 行 ({len(excluded)} 个 campaign)")
+    return records
+
 def _load_xlsx(path):
     import pandas as pd
     print(f"读取 xlsx: {path.name}  sheet={SHEET_NAME}")
-    df = pd.read_excel(path, sheet_name=SHEET_NAME, dtype=str, header=None)
-    # 找第一个 header 行（含 'ds'）
-    header_idx = 0
-    for i, row in df.iterrows():
-        if any(str(v).strip().lower() == "ds" for v in row.values):
-            header_idx = i
-            break
-    df.columns = [str(v).strip() for v in df.iloc[header_idx].tolist()]
-    df = df.iloc[header_idx + 1:].reset_index(drop=True)
-    # 过滤掉重复的 header 行（ds 列值为 'ds'）
-    df = df[~df['ds'].str.strip().str.lower().isin(['ds', 'campaign_id'])].reset_index(drop=True)
-    return _df_to_records(df)
+    raw = pd.read_excel(path, sheet_name=SHEET_NAME, dtype=str, header=None)
+
+    # 找出所有 header 行（首列值为 'ds'）
+    header_idxs = [i for i, row in raw.iterrows()
+                   if str(row.iloc[0]).strip().lower() == "ds"]
+    if not header_idxs:
+        return []
+
+    all_records = []
+    for sec_i, h_i in enumerate(header_idxs):
+        end_i = header_idxs[sec_i + 1] if sec_i + 1 < len(header_idxs) else len(raw)
+        cols  = [str(v).strip() for v in raw.iloc[h_i].tolist()]
+        cm    = {c: ci for ci, c in enumerate(cols) if c not in ("nan", "None", "")}
+
+        # 花费列：花费 > costdsp
+        spend_i    = cm.get("花费",        cm.get("costdsp"))
+        roi_i      = cm.get("24h-gmvroi",  cm.get("24h_gmvroi"))
+        # DAC列：优先 24h_dac（新格式），其次 session_dac
+        dac_i      = cm.get("24h_dac",     cm.get("session_dac"))
+        # dac成本：新格式直接提供
+        dac_cost_i = cm.get("dac成本")
+        name_i     = cm.get("campaign_name", cm.get("campaign_namedsp"))
+        cid_i      = cm.get("campaign_id")
+
+        def _gv(row, idx):
+            if idx is None: return None
+            v = str(row.iloc[idx]).strip()
+            return None if v in ("nan", "None", "", "-") else v
+
+        def _tf(v):
+            try: return float(str(v).replace(",", "")) if v is not None else None
+            except: return None
+
+        for row_i in range(h_i + 1, end_i):
+            row = raw.iloc[row_i]
+            try:
+                ds_raw = str(row.iloc[0]).strip().split(".")[0]
+                if not ds_raw.isdigit() or len(ds_raw) != 8:
+                    continue
+                name  = _gv(row, name_i) or ""
+                cid   = _gv(row, cid_i) or ""
+                spend = _tf(_gv(row, spend_i)) or 0.0
+                roi   = _tf(_gv(row, roi_i))
+                dac   = _tf(_gv(row, dac_i)) or 0.0
+                # dac成本：新格式直接读取；旧格式留 None（由 build_dac_data 按汇总计算）
+                dac_cost = _tf(_gv(row, dac_cost_i)) if dac_cost_i is not None else None
+                all_records.append({
+                    "ds": ds_raw, "name": name, "cid": cid,
+                    "spend": spend, "roi": roi, "dac": dac, "dac_cost": dac_cost,
+                })
+            except Exception:
+                continue
+
+    print(f"加载 {len(all_records)} 行数据")
+    return all_records
 
 def _load_csv(path):
     import pandas as pd
@@ -97,176 +159,159 @@ def _load_numbers(path):
         roi_v   = table.cell(r, col.get("24h-gmvroi",   20)).value
         spend = float(spend_v) if isinstance(spend_v, (int, float)) else 0.0
         roi   = float(roi_v)   if isinstance(roi_v,   (int, float)) else None
-        records.append({"ds": ds, "name": name, "cid": cid, "spend": spend, "roi": roi})
+        records.append({"ds": ds, "name": name, "cid": cid, "spend": spend, "roi": roi, "dac": 0, "dac_cost": None})
     print(f"加载 {len(records)} 行数据")
     return records
 
 def _df_to_records(df):
+    """CSV / Numbers 备用加载路径（xlsx 走 _load_xlsx 逐 section 解析）"""
     records = []
-    roi_col = next((c for c in df.columns if "24h-gmvroi" in c or "24h_gmvroi" in c), None)
-    spend_col = next((c for c in df.columns if c in ("花费", "spend")), None)
+    roi_col      = next((c for c in df.columns if "24h-gmvroi" in c or "24h_gmvroi" in c), None)
+    spend_col    = next((c for c in df.columns if c in ("花费", "spend", "costdsp")), None)
+    dac_col      = next((c for c in df.columns if c in ("24h_dac", "session_dac")), None)
+    dac_cost_col = next((c for c in df.columns if c == "dac成本"), None)
     for _, row in df.iterrows():
         try:
             ds_raw = str(row.get("ds", "")).strip().split(".")[0]
             if not ds_raw.isdigit() or len(ds_raw) != 8: continue
-            name    = str(row.get("campaign_name", "") or "")
-            cid     = str(row.get("campaign_id",   "") or "")
-            spend   = float(str(row.get(spend_col, 0) or 0).replace(",", "")) if spend_col else 0.0
-            roi_raw = row.get(roi_col) if roi_col else None
-            roi     = float(roi_raw) if roi_raw not in (None, "", "nan", "None") else None
-            records.append({"ds": ds_raw, "name": name, "cid": cid, "spend": spend, "roi": roi})
+            name     = str(row.get("campaign_name", row.get("campaign_namedsp", "")) or "")
+            cid      = str(row.get("campaign_id", "") or "")
+            spend    = float(str(row.get(spend_col, 0) or 0).replace(",", "")) if spend_col else 0.0
+            roi_raw  = row.get(roi_col) if roi_col else None
+            roi      = float(roi_raw) if roi_raw not in (None, "", "nan", "None") else None
+            dac_raw  = row.get(dac_col) if dac_col else None
+            dac      = float(str(dac_raw).replace(",", "")) if dac_raw not in (None, "", "nan", "None") else 0.0
+            dc_raw   = row.get(dac_cost_col) if dac_cost_col else None
+            dac_cost = float(str(dc_raw).replace(",", "")) if dc_raw not in (None, "", "nan", "None") else None
+            records.append({"ds": ds_raw, "name": name, "cid": cid,
+                            "spend": spend, "roi": roi, "dac": dac, "dac_cost": dac_cost})
         except (ValueError, TypeError):
             continue
     print(f"加载 {len(records)} 行数据")
     return records
 
-# ─── 分国家 DAC 数据 ──────────────────────────────────────────────────────────
-def load_country_dac_data():
-    """读取 分国家数据 sheet，自动识别各时期格式，返回含 dac_cost/d1p_cost 的记录"""
-    import pandas as pd
-    if not XLSX_FILE.exists():
-        return []
-    try:
-        df = pd.read_excel(XLSX_FILE, sheet_name="分国家数据", header=None, dtype=str)
-    except Exception as e:
-        print(f"  [DAC] 读取分国家数据失败: {e}")
-        return []
-
-    def to_f(v):
-        try:
-            s = str(v).strip().replace(",", "")
-            return float(s) if s not in ("nan", "None", "", "-") else None
-        except Exception:
-            return None
-
-    records = []
-    for _, row in df.iterrows():
-        try:
-            ds_raw = str(row.iloc[0]).strip().split(".")[0]
-            if not ds_raw.isdigit() or len(ds_raw) != 8:
-                continue
-            ym      = ds_raw[:6]
-            country = str(row.iloc[1]).strip()
-            col2    = str(row.iloc[2]).strip()
-            col3    = str(row.iloc[3]).strip()
-
-            gmv = dac = cost = roi = d1p = None
-
-            if ym in ("202511", "202512"):
-                # col2=Total/Total 或 Total/Moloco → col4=gmv, col5=DAC, col6=cost, col7=ROI
-                if col3 not in ("Moloco", "Total"):
-                    continue
-                gmv  = to_f(row.iloc[4])
-                dac  = to_f(row.iloc[5])
-                cost = to_f(row.iloc[6])
-                roi  = to_f(row.iloc[7])
-            elif ym in ("202601", "202602", "202603"):
-                # col3=Moloco, col4=Total(extra) → col5=gmv, col6=DAC, col7=cost, col8=ROI
-                if col3 != "Moloco":
-                    continue
-                gmv  = to_f(row.iloc[5])
-                dac  = to_f(row.iloc[6])
-                cost = to_f(row.iloc[7])
-                roi  = to_f(row.iloc[8])
-            elif ym == "202604":
-                # col2=Moloco, col3=gmv, col4=D1P, col5=DAC, col6=cost, col7=ROI
-                if col2 != "Moloco":
-                    continue
-                gmv  = to_f(row.iloc[3])
-                d1p  = to_f(row.iloc[4])
-                dac  = to_f(row.iloc[5])
-                cost = to_f(row.iloc[6])
-                roi  = to_f(row.iloc[7])
-            elif ym >= "202605":
-                # col2=Moloco, col3=DAC, col4=gmv, col5=D1P, col6=cost, col7=ROI
-                if col2 != "Moloco":
-                    continue
-                dac  = to_f(row.iloc[3])
-                gmv  = to_f(row.iloc[4])
-                d1p  = to_f(row.iloc[5])
-                cost = to_f(row.iloc[6])
-                roi  = to_f(row.iloc[7])
-            else:
-                continue
-
-            if not cost or not dac or cost <= 0 or dac <= 0:
-                continue
-
-            records.append({
-                "ds": ds_raw, "country": country,
-                "cost": cost, "dac": dac,
-                "d1p": d1p if (d1p and d1p > 0) else None,
-                "roi": roi, "gmv": gmv,
-                "dac_cost": round(cost / dac, 2),
-                "d1p_cost": round(cost / d1p, 2) if (d1p and d1p > 0) else None,
-            })
-        except Exception:
-            continue
-
-    print(f"  [DAC] 加载分国家数据 {len(records)} 行，日期范围: "
-          f"{min(r['ds'] for r in records) if records else '?'} ~ "
-          f"{max(r['ds'] for r in records) if records else '?'}")
-    return records
-
-
-def build_dac_data(dac_records):
-    """按 7/14/30 天窗口聚合 DAC成本 & D1P成本，返回各国时序数据"""
-    if not dac_records:
+# ─── DAC 数据（来自最新 sheet dac成本字段，24h_dac 口径）──────────────────────
+def build_dac_data(records):
+    """按 3/7/14 天窗口聚合 dac成本，返回国家汇总 + 分天趋势 + Campaign 分天趋势"""
+    if not records:
         return {}
-    all_dates = sorted({r["ds"] for r in dac_records})
     result = {}
-    for n in (7, 14, 30):
-        end_dt   = datetime.strptime(all_dates[-1], "%Y%m%d")
-        start_dt = end_dt - timedelta(days=n - 1)
-        dates    = [d for d in all_dates if datetime.strptime(d, "%Y%m%d") >= start_dt]
+    for n in (3, 7, 14):
+        dates    = get_window(records, n)
         labels   = fmt_dates(dates)
         date_set = set(dates)
 
-        from collections import defaultdict
-        cdata = defaultdict(lambda: defaultdict(lambda: {"cost": 0.0, "dac": 0.0, "d1p": 0.0}))
-        for r in dac_records:
+        # country → day → {cost, dac}
+        c_daily = defaultdict(lambda: defaultdict(lambda: {"cost": 0.0, "dac": 0.0}))
+        # country → camp_short → day → {cost, dac}
+        c_camp  = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: {"cost": 0.0, "dac": 0.0})))
+        # DAC 专项：整体 + 分 campaign
+        sp_overall = defaultdict(lambda: {"cost": 0.0, "dac": 0.0})           # ds → {cost, dac}
+        sp_camp    = defaultdict(lambda: defaultdict(lambda: {"cost": 0.0, "dac": 0.0}))  # camp_short → ds → {cost, dac}
+
+        for r in records:
             if r["ds"] not in date_set:
                 continue
-            b = cdata[r["country"]][r["ds"]]
-            b["cost"] += r["cost"]
-            b["dac"]  += r["dac"]
-            if r["d1p"]:
-                b["d1p"] += r["d1p"]
+            # 只用有 dac成本 直接字段的记录（24h_dac 口径），session_dac 不参与
+            if r.get("dac_cost") is None:
+                continue
+            _, label = classify(r["name"])
+            sn = short_name(r["name"])
+            c_daily[label][r["ds"]]["cost"] += r["spend"]
+            c_daily[label][r["ds"]]["dac"]  += r.get("dac") or 0
+            c_camp[label][sn][r["ds"]]["cost"] += r["spend"]
+            c_camp[label][sn][r["ds"]]["dac"]  += r.get("dac") or 0
+            # DAC 专项独立聚合（不影响国家口径）
+            if "DAC专项" in (r.get("name") or ""):
+                sp_overall[r["ds"]]["cost"] += r["spend"]
+                sp_overall[r["ds"]]["dac"]  += r.get("dac") or 0
+                sp_camp[sn][r["ds"]]["cost"] += r["spend"]
+                sp_camp[sn][r["ds"]]["dac"]  += r.get("dac") or 0
 
-        dac_series, d1p_series = {}, {}
-        for c in sorted(cdata.keys()):
-            dc, dp = [], []
-            for d in dates:
-                b = cdata[c].get(d, {"cost": 0, "dac": 0, "d1p": 0})
-                dc.append(round(b["cost"] / b["dac"], 2) if b["dac"] > 0 and b["cost"] > 0 else None)
-                dp.append(round(b["cost"] / b["d1p"], 2) if b["d1p"] > 0 and b["cost"] > 0 else None)
-            if any(v for v in dc if v is not None):
-                dac_series[c] = dc
-            if any(v for v in dp if v is not None):
-                d1p_series[c] = dp
+        # Country summary（窗口合计）
+        country_summary = {}
+        for c, ds_map in c_daily.items():
+            tc = sum(b["cost"] for b in ds_map.values())
+            td = sum(b["dac"]  for b in ds_map.values())
+            if td > 0:
+                country_summary[c] = {
+                    "cost":        round(tc, 0),
+                    "dac":         round(td, 0),
+                    "dac_cost":    round(tc / td, 2),
+                    "daily_spend": round(tc / n, 0),
+                }
 
-        # 最新一天排名（用于 summary 卡片）
-        last_day = dates[-1] if dates else None
-        ranking = []
-        if last_day:
-            for c in sorted(cdata.keys()):
-                b = cdata[c].get(last_day, {"cost": 0, "dac": 0, "d1p": 0})
-                if b["cost"] > 0 and b["dac"] > 0:
-                    ranking.append({
-                        "country":  c,
-                        "cost":     round(b["cost"], 0),
-                        "dac":      round(b["dac"], 0),
-                        "dac_cost": round(b["cost"] / b["dac"], 2),
-                        "d1p_cost": round(b["cost"] / b["d1p"], 2) if b["d1p"] > 0 else None,
-                    })
-            ranking.sort(key=lambda x: x["dac_cost"])
+        # Country daily series（分天 DAC成本）
+        country_daily = {}
+        for c, ds_map in c_daily.items():
+            series = [round(ds_map[d]["cost"] / ds_map[d]["dac"], 2)
+                      if ds_map.get(d, {}).get("dac", 0) > 0 else None
+                      for d in dates]
+            if any(v is not None for v in series):
+                country_daily[c] = series
+
+        # Camp daily per country
+        camp_daily = {}
+        for c, camp_map in c_camp.items():
+            camps = {}
+            for camp, ds_map in camp_map.items():
+                series = [round(ds_map[d]["cost"] / ds_map[d]["dac"], 2)
+                          if ds_map.get(d, {}).get("dac", 0) > 0 else None
+                          for d in dates]
+                if any(v is not None for v in series):
+                    camps[camp] = series
+            if camps:
+                camp_daily[c] = camps
+
+        # DAC 专项：整体 + 分 campaign 的汇总和分天序列
+        def _series(ds_map):
+            spend_s = [round(ds_map.get(d, {}).get("cost", 0), 2) for d in dates]
+            dac_s   = [int(round(ds_map.get(d, {}).get("dac", 0), 0)) for d in dates]
+            cost_s  = [round(ds_map[d]["cost"] / ds_map[d]["dac"], 2)
+                       if ds_map.get(d, {}).get("dac", 0) > 0 else None
+                       for d in dates]
+            return spend_s, dac_s, cost_s
+
+        dac_special = {}
+        if sp_overall:
+            tc = sum(b["cost"] for b in sp_overall.values())
+            td = sum(b["dac"]  for b in sp_overall.values())
+            sp_s, dc_s, cs_s = _series(sp_overall)
+            dac_special["overall"] = {
+                "cost":         round(tc, 0),
+                "dac":          int(round(td, 0)),
+                "dac_cost":     round(tc / td, 2) if td > 0 else None,
+                "daily_spend":  round(tc / n, 0),
+                "spend_series": sp_s,
+                "dac_series":   dc_s,
+                "cost_series":  cs_s,
+            }
+            camps = {}
+            for camp, ds_map in sp_camp.items():
+                tc2 = sum(b["cost"] for b in ds_map.values())
+                td2 = sum(b["dac"]  for b in ds_map.values())
+                sp2, dc2, cs2 = _series(ds_map)
+                camps[camp] = {
+                    "cost":         round(tc2, 0),
+                    "dac":          int(round(td2, 0)),
+                    "dac_cost":     round(tc2 / td2, 2) if td2 > 0 else None,
+                    "daily_spend":  round(tc2 / n, 0),
+                    "spend_series": sp2,
+                    "dac_series":   dc2,
+                    "cost_series":  cs2,
+                }
+            dac_special["campaigns"] = camps
 
         result[str(n)] = {
-            "labels":     labels,
-            "dac_series": dac_series,
-            "d1p_series": d1p_series,
-            "ranking":    ranking,
+            "labels":          labels,
+            "country_summary": country_summary,
+            "country_daily":   country_daily,
+            "camp_daily":      camp_daily,
+            "dac_special":     dac_special,
         }
+        n_countries = len(country_summary)
+        n_special   = len(dac_special.get("campaigns", {})) if dac_special else 0
+        print(f"  [DAC] {n}天窗口: {n_countries} 个国家/项目有 dac成本 数据 · DAC专项 {n_special} 个 campaign")
     return result
 
 # ─── 日期窗口 ─────────────────────────────────────────────────────────────────
@@ -737,12 +782,15 @@ canvas{{max-height:340px}}
 
 <!-- ══ 项目面板 ══ -->
 <div id="panel-project" class="panel">
-  <div class="section-title">项目汇总</div>
+  <div class="section-title">
+    项目汇总
+    <span id="clear-project" class="clear-btn" style="display:none" onclick="selectProject(null)">✕ 清除筛选</span>
+  </div>
   <div id="proj-cards" class="cards"></div>
   <div class="chart-box">
-    <div class="chart-hd">项目日消耗（柱）& ROI（线）<span class="badge">左轴: 消耗 USD · 右轴: ROI</span></div>
+    <div class="chart-hd" id="proj-chart-title">项目日消耗（柱）& ROI（线）<span class="badge">左轴: 消耗 USD · 右轴: ROI</span></div>
     <canvas id="projChart"></canvas>
-    <div class="note">ROI = 24h-gmvroi，花费加权均值</div>
+    <div class="note">点击项目卡片单独查看；再次点击或点 ✕ 取消筛选</div>
   </div>
 </div>
 
@@ -778,24 +826,29 @@ canvas{{max-height:340px}}
 
 <!-- ══ DAC成本 面板 ══ -->
 <div id="panel-dac" class="panel">
-  <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;flex-wrap:wrap">
     <span style="font-size:13px;color:#64748b;font-weight:500">数据窗口：</span>
-    <button class="spbtn active" id="dac-btn-7" onclick="setDacPeriod(7)">近7天</button>
-    <button class="spbtn" id="dac-btn-14" onclick="setDacPeriod(14)">近14天</button>
-    <button class="spbtn" id="dac-btn-30" onclick="setDacPeriod(30)">近30天</button>
-    <span style="font-size:12px;color:#94a3b8;margin-left:8px">目标：整体DAC成本 &lt; $4</span>
+    <button class="spbtn active" id="dac-btn-3"  onclick="setDacPeriod(3)">近3天</button>
+    <button class="spbtn"        id="dac-btn-7"  onclick="setDacPeriod(7)">近7天</button>
+    <button class="spbtn"        id="dac-btn-14" onclick="setDacPeriod(14)">近14天</button>
+    <span style="font-size:12px;color:#94a3b8;margin-left:4px">数据源：最新 sheet · dac成本字段（24h_dac口径）</span>
   </div>
-  <div class="section-title">各国 DAC成本排名（最新日数据）</div>
-  <div id="dac-ranking" style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:24px"></div>
-  <div class="chart-box">
-    <div class="chart-hd">各国 DAC成本日趋势（花费 / DAC次数）<span class="badge">越低越好 · 目标 &lt; $4</span></div>
-    <canvas id="dacChart"></canvas>
-    <div class="note">DAC成本 = 当日花费 / 当日DAC次数；数据来源：分国家数据 sheet</div>
+  <div class="section-title">
+    各国 DAC成本（窗口合计）
+    <span id="clear-dac-country" class="clear-btn" style="display:none" onclick="selectDacCountry(null)">✕ 清除</span>
   </div>
-  <div id="d1p-chart-box" class="chart-box" style="display:none">
-    <div class="chart-hd">各国 D1P成本日趋势（花费 / D1 Purchaser）<span class="badge">Apr 2026起可用</span></div>
-    <canvas id="d1pChart"></canvas>
-    <div class="note">D1 Purchaser = 当日首次付费用户数；D1P成本 = 花费 / D1P数量</div>
+  <div id="dac-country-cards" class="cards"></div>
+  <div id="dac-chart-area">
+    <div class="empty-hint">👆 点击国家 / 项目卡片，查看日趋势和 Campaign 明细</div>
+  </div>
+
+  <div class="section-title" style="margin-top:32px">
+    DAC 专项（campaign name 含「DAC专项」）
+    <span id="clear-dac-special" class="clear-btn" style="display:none" onclick="selectDacSpecial(null)">✕ 清除</span>
+  </div>
+  <div id="dac-special-cards" class="cards"></div>
+  <div id="dac-special-chart-area">
+    <div class="empty-hint">👆 点击「整体」或单个 campaign 卡片，查看 DAC数 / 花费 / DAC成本 分天趋势</div>
   </div>
 </div>
 
@@ -812,13 +865,17 @@ const DAC_PALETTE = [
 
 let period     = 14;
 let sigPeriod  = 7;  // 信号对比窗口: 1 / 3 / 7
-let dacPeriod  = 7;
-let activeTab  = "home";
-let selCountry = null;
-let selGroup   = null;
+let dacPeriod      = 3;
+let activeTab      = "home";
+let selProject     = null;
+let selCountry     = null;
+let selGroup       = null;
+let selDacCountry  = null;
+let selDacSpecial  = null;
 
 let projChart=null, countryChart=null, projRefChart=null, campChart=null;
-let dacChart=null, d1pChart=null;
+let dacTrendChart=null, dacCampChart=null;
+let dacSpecSpendChart=null, dacSpecCostChart=null;
 
 if (typeof ChartDataLabels !== "undefined") Chart.register(ChartDataLabels);
 
@@ -964,13 +1021,34 @@ function renderProject() {{
   Object.entries(d.proj_summary).sort((a,b)=>(b[1].spend||0)-(a[1].spend||0))
     .forEach(([lbl,s])=>{{
       const daily = days > 0 ? Math.round((s.spend||0)/days).toLocaleString() : "-";
-      const div=document.createElement("div"); div.className="card";
+      const div=document.createElement("div");
+      div.className="card"+(selProject===lbl?" selected":"");
       div.innerHTML=`<div class="name">${{lbl}}</div>
         <div class="spend">$${{(s.spend||0).toLocaleString()}}</div>
         <div class="roi">日均: $${{daily}} · ROI: ${{s.roi!=null?s.roi+"x":"-"}}</div>`;
+      div.onclick=()=>selectProject(lbl===selProject?null:lbl);
       cards.appendChild(div);
     }});
-  projChart = makeChart("projChart", d.proj_ds, d.labels, projChart);
+
+  const titleEl = document.getElementById("proj-chart-title");
+  if (selProject && d.proj_raw && d.proj_raw[selProject]) {{
+    const raw = d.proj_raw[selProject];
+    const pc  = (d.p_colors||{{}})[selProject] || {{bar:"rgba(99,102,241,.75)",line:"#4f46e5"}};
+    const ds  = [
+      {{label:selProject, data:raw.spend, backgroundColor:pc.bar, borderColor:pc.line,
+        borderWidth:1, yAxisID:"ySpend", type:"bar", stack:"spend"}},
+      {{label:selProject+" ROI", data:raw.roi, borderColor:pc.line, backgroundColor:"transparent",
+        borderWidth:2.5, pointRadius:4, pointHoverRadius:6, tension:0.3,
+        yAxisID:"yROI", type:"line", spanGaps:true}},
+    ];
+    if (titleEl) titleEl.innerHTML=`${{selProject}} 日消耗（柱）& ROI（线）<span class="badge">左轴: 消耗 USD · 右轴: ROI</span>`;
+    document.getElementById("clear-project").style.display="inline";
+    projChart = makeChart("projChart", ds, d.labels, projChart);
+  }} else {{
+    if (titleEl) titleEl.innerHTML=`项目日消耗（柱）& ROI（线）<span class="badge">左轴: 消耗 USD · 右轴: ROI</span>`;
+    document.getElementById("clear-project").style.display="none";
+    projChart = makeChart("projChart", d.proj_ds, d.labels, projChart);
+  }}
 }}
 
 // ── 国家面板 ────────────────────────────────────────────────────────────────
@@ -1055,69 +1133,137 @@ function makeChip(lbl,s,isProj) {{
 // ── DAC成本 面板 ─────────────────────────────────────────────────────────────
 function setDacPeriod(n) {{
   dacPeriod = n;
-  [7, 14, 30].forEach(d => {{
+  [3, 7, 14].forEach(d => {{
     const btn = document.getElementById('dac-btn-' + d);
     if (btn) btn.classList.toggle('active', d === n);
   }});
   renderDac();
 }}
 
+function selectDacCountry(c) {{
+  selDacCountry = c;
+  renderDac();
+}}
+
+function selectDacSpecial(k) {{
+  selDacSpecial = k;
+  renderDacSpecial();
+}}
+
 function renderDac() {{
-  if (!DAC_DATA || Object.keys(DAC_DATA).length === 0) {{
-    const el = document.getElementById('panel-dac');
-    if (el) el.innerHTML = '<div class="empty-hint">暂无分国家DAC数据，请确认 Excel 中存在"分国家数据" sheet</div>';
+  if (!DAC_DATA || !DAC_DATA[String(dacPeriod)]) return;
+  renderDacSpecial();
+  const d       = DAC_DATA[String(dacPeriod)];
+  const summary = d.country_summary || {{}};
+  const labels  = d.labels || [];
+
+  // 国家 / 项目卡片
+  const cardsEl = document.getElementById('dac-country-cards');
+  if (cardsEl) {{
+    cardsEl.innerHTML = '';
+    Object.entries(summary)
+      .sort((a, b) => a[1].dac_cost - b[1].dac_cost)
+      .forEach(([c, s]) => {{
+        const sel = selDacCountry === c;
+        const div = document.createElement('div');
+        div.className = 'card' + (sel ? ' selected' : '');
+        div.innerHTML = `<div class="name">${{c}}</div>
+          <div class="spend">$${{s.dac_cost}}</div>
+          <div class="roi">日均消耗: $${{(s.daily_spend||0).toLocaleString()}} · 总花费: $${{s.cost.toLocaleString()}}</div>
+          <div class="roi">DAC: ${{s.dac}}</div>`;
+        div.onclick = () => selectDacCountry(c === selDacCountry ? null : c);
+        cardsEl.appendChild(div);
+      }});
+  }}
+  const clearBtn = document.getElementById('clear-dac-country');
+  if (clearBtn) clearBtn.style.display = selDacCountry ? 'inline' : 'none';
+
+  // 图表区
+  const area = document.getElementById('dac-chart-area');
+  if (!selDacCountry || !(d.country_daily || {{}})[selDacCountry]) {{
+    area.innerHTML = '<div class="empty-hint">👆 点击国家 / 项目卡片，查看日趋势和 Campaign 明细</div>';
+    if (dacTrendChart) {{ dacTrendChart.destroy(); dacTrendChart = null; }}
+    if (dacCampChart)  {{ dacCampChart.destroy();  dacCampChart  = null; }}
     return;
   }}
-  const d = DAC_DATA[String(dacPeriod)];
-  if (!d) return;
 
-  // 排名卡片
-  const rankEl = document.getElementById('dac-ranking');
-  if (rankEl) {{
-    rankEl.innerHTML = '';
-    (d.ranking || []).forEach(r => {{
-      const good = r.dac_cost < 4;
-      const div = document.createElement('div');
-      div.className = 'card';
-      div.style.borderColor = good ? '#059669' : (r.dac_cost < 6 ? '#f59e0b' : '#e2e8f0');
-      div.style.borderWidth = '2px';
-      div.innerHTML = `<div class="name">${{r.country}}</div>
-        <div class="spend" style="color:${{good?'#059669':(r.dac_cost<6?'#d97706':'#dc2626')}}">$${{r.dac_cost}}</div>
-        <div class="roi">花费: $${{r.cost.toLocaleString()}} · DAC: ${{r.dac}}</div>
-        ${{r.d1p_cost ? `<div class="roi" style="color:#7c3aed">D1P: $${{r.d1p_cost}}</div>` : ''}}`;
-      rankEl.appendChild(div);
-    }});
-  }}
+  area.innerHTML = `
+    <div class="chart-box">
+      <div class="chart-hd">${{selDacCountry}} — DAC成本日趋势
+        <span class="badge">dac成本字段 · 24h_dac口径</span></div>
+      <canvas id="dacTrendChart"></canvas>
+      <div class="note">数据来源：dac成本字段（costdsp / 24h_dac）</div>
+    </div>
+    <div class="chart-box">
+      <div class="chart-hd">${{selDacCountry}} — Campaign DAC成本
+        <span class="badge">分 Campaign 分天</span></div>
+      <canvas id="dacCampChart"></canvas>
+      <div class="note">图例可点击隐藏 / 显示单个 Campaign</div>
+    </div>`;
 
-  // DAC趋势图
-  const dacSeries = d.dac_series || {{}};
-  const labels = d.labels || [];
-  const dacDs = Object.entries(dacSeries).map(([country, vals], i) => {{
-    const [rv, gv, bv] = DAC_PALETTE[i % DAC_PALETTE.length];
-    return {{
-      label: country, data: vals,
-      borderColor: `rgb(${{rv}},${{gv}},${{bv}})`,
-      backgroundColor: 'transparent',
-      borderWidth: 2.5, pointRadius: 4, pointHoverRadius: 6,
+  // 国家日趋势
+  const cData = d.country_daily[selDacCountry];
+  if (dacTrendChart) dacTrendChart.destroy();
+  dacTrendChart = new Chart(document.getElementById('dacTrendChart'), {{
+    type: 'line',
+    data: {{ labels, datasets: [{{
+      label: selDacCountry + ' DAC成本',
+      data: cData,
+      borderColor: '#4f46e5',
+      backgroundColor: 'rgba(79,70,229,0.07)',
+      fill: true,
+      borderWidth: 2.5, pointRadius: 5, pointHoverRadius: 7,
       tension: 0.3, spanGaps: true,
-    }};
-  }});
-  dacDs.push({{
-    label: '目标线 $4', data: labels.map(() => 4),
-    borderColor: 'rgba(239,68,68,0.55)', backgroundColor: 'transparent',
-    borderWidth: 1.5, borderDash: [6, 4], pointRadius: 0, tension: 0,
-  }});
-
-  if (dacChart) dacChart.destroy();
-  dacChart = new Chart(document.getElementById('dacChart'), {{
-    type: 'line', data: {{ labels, datasets: dacDs }},
+    }}] }},
     options: {{
-      responsive: true, interaction: {{ mode: 'index', intersect: false }},
+      responsive: true,
+      interaction: {{ mode: 'index', intersect: false }},
       scales: {{
         x: {{ grid: {{ color: 'rgba(0,0,0,.05)' }}, ticks: {{ font: {{ size: 12 }} }} }},
         y: {{
           title: {{ display: true, text: 'DAC成本 (USD)', font: {{ size: 12 }} }},
-          ticks: {{ callback: v => "$" + v, font: {{ size: 11 }} }}, min: 0,
+          ticks: {{ callback: v => '$' + v, font: {{ size: 11 }} }}, min: 0,
+        }},
+      }},
+      plugins: {{
+        legend: {{ display: false }},
+        tooltip: {{ callbacks: {{ label: ctx => ctx.dataset.label + ': $' + ctx.parsed.y }} }},
+        datalabels: {{
+          display: true,
+          formatter: v => v != null ? '$' + v : null,
+          color: '#4f46e5', font: {{ size: 11, weight: '700' }},
+          anchor: 'top', align: 'top', offset: 3,
+          backgroundColor: 'rgba(255,255,255,0.85)', borderRadius: 3,
+          padding: {{ top: 2, bottom: 2, left: 4, right: 4 }},
+        }},
+      }},
+    }},
+  }});
+
+  // Campaign 明细
+  const campData = ((d.camp_daily || {{}})[selDacCountry]) || {{}};
+  const campDs = Object.entries(campData).map(([camp, vals], i) => {{
+    const [rv, gv, bv] = DAC_PALETTE[i % DAC_PALETTE.length];
+    return {{
+      label: camp, data: vals,
+      borderColor: `rgb(${{rv}},${{gv}},${{bv}})`,
+      backgroundColor: 'transparent',
+      borderWidth: 2, pointRadius: 4, pointHoverRadius: 6,
+      tension: 0.3, spanGaps: true,
+    }};
+  }});
+  if (dacCampChart) dacCampChart.destroy();
+  dacCampChart = new Chart(document.getElementById('dacCampChart'), {{
+    type: 'line',
+    data: {{ labels, datasets: campDs }},
+    options: {{
+      responsive: true,
+      interaction: {{ mode: 'index', intersect: false }},
+      scales: {{
+        x: {{ grid: {{ color: 'rgba(0,0,0,.05)' }}, ticks: {{ font: {{ size: 12 }} }} }},
+        y: {{
+          title: {{ display: true, text: 'DAC成本 (USD)', font: {{ size: 12 }} }},
+          ticks: {{ callback: v => '$' + v, font: {{ size: 11 }} }}, min: 0,
         }},
       }},
       plugins: {{
@@ -1126,53 +1272,165 @@ function renderDac() {{
           const v = ctx.parsed.y;
           return v != null ? ctx.dataset.label + ': $' + v : null;
         }} }} }},
-        datalabels: {{ display: false }},
+        datalabels: {{
+          display: true,
+          formatter: v => v != null ? '$' + v : null,
+          color: ctx => ctx.dataset.borderColor || '#333',
+          font: {{ size: 10, weight: '700' }},
+          anchor: 'top', align: 'top', offset: 2,
+          backgroundColor: 'rgba(255,255,255,0.82)', borderRadius: 3,
+          padding: {{ top: 1, bottom: 1, left: 3, right: 3 }},
+        }},
+      }},
+    }},
+  }});
+}}
+
+// ── DAC 专项板块 ─────────────────────────────────────────────────────────────
+function renderDacSpecial() {{
+  if (!DAC_DATA || !DAC_DATA[String(dacPeriod)]) return;
+  const d  = DAC_DATA[String(dacPeriod)];
+  const sp = d.dac_special || {{}};
+  const labels = d.labels || [];
+  const cardsEl = document.getElementById('dac-special-cards');
+  const area    = document.getElementById('dac-special-chart-area');
+  if (!cardsEl || !area) return;
+
+  cardsEl.innerHTML = '';
+  if (!sp.overall) {{
+    cardsEl.innerHTML = '<div class="empty-hint" style="width:100%">当前窗口暂无 DAC 专项数据</div>';
+    area.innerHTML = '';
+    if (dacSpecSpendChart) {{ dacSpecSpendChart.destroy(); dacSpecSpendChart = null; }}
+    if (dacSpecCostChart)  {{ dacSpecCostChart.destroy();  dacSpecCostChart  = null; }}
+    const clr = document.getElementById('clear-dac-special');
+    if (clr) clr.style.display = 'none';
+    return;
+  }}
+
+  // 整体卡片（高亮金色边框区分）
+  const ov = sp.overall;
+  const ovSel = selDacSpecial === '__overall__';
+  const ovDiv = document.createElement('div');
+  ovDiv.className = 'card' + (ovSel ? ' selected' : '');
+  ovDiv.style.borderColor = ovSel ? '#4f46e5' : '#fbbf24';
+  ovDiv.style.background  = ovSel ? '#ede9fe' : '#fffbeb';
+  ovDiv.innerHTML = `<div class="name">🎯 整体</div>
+    <div class="spend">$${{ov.dac_cost ?? '-'}}</div>
+    <div class="roi">日均消耗: $${{(ov.daily_spend||0).toLocaleString()}} · 总花费: $${{ov.cost.toLocaleString()}}</div>
+    <div class="roi">DAC: ${{ov.dac}}</div>`;
+  ovDiv.onclick = () => selectDacSpecial(ovSel ? null : '__overall__');
+  cardsEl.appendChild(ovDiv);
+
+  // 各 campaign 卡片
+  const camps = sp.campaigns || {{}};
+  Object.entries(camps)
+    .sort((a, b) => (b[1].cost || 0) - (a[1].cost || 0))
+    .forEach(([camp, s]) => {{
+      const sel = selDacSpecial === camp;
+      const div = document.createElement('div');
+      div.className = 'card' + (sel ? ' selected' : '');
+      div.innerHTML = `<div class="name">${{camp}}</div>
+        <div class="spend">$${{s.dac_cost ?? '-'}}</div>
+        <div class="roi">日均消耗: $${{(s.daily_spend||0).toLocaleString()}} · 总花费: $${{s.cost.toLocaleString()}}</div>
+        <div class="roi">DAC: ${{s.dac}}</div>`;
+      div.onclick = () => selectDacSpecial(sel ? null : camp);
+      cardsEl.appendChild(div);
+    }});
+
+  const clearBtn = document.getElementById('clear-dac-special');
+  if (clearBtn) clearBtn.style.display = selDacSpecial ? 'inline' : 'none';
+
+  // 趋势图
+  if (!selDacSpecial) {{
+    area.innerHTML = '<div class="empty-hint">👆 点击「整体」或单个 campaign 卡片，查看 DAC数 / 花费 / DAC成本 分天趋势</div>';
+    if (dacSpecSpendChart) {{ dacSpecSpendChart.destroy(); dacSpecSpendChart = null; }}
+    if (dacSpecCostChart)  {{ dacSpecCostChart.destroy();  dacSpecCostChart  = null; }}
+    return;
+  }}
+  const target = selDacSpecial === '__overall__' ? ov : (camps[selDacSpecial] || null);
+  if (!target) return;
+  const title = selDacSpecial === '__overall__' ? 'DAC 专项整体' : selDacSpecial;
+
+  area.innerHTML = `
+    <div class="chart-box">
+      <div class="chart-hd">${{title}} — 花费 & DAC 数
+        <span class="badge">左轴: 花费 USD · 右轴: DAC 数</span></div>
+      <canvas id="dacSpecSpendChart"></canvas>
+    </div>
+    <div class="chart-box">
+      <div class="chart-hd">${{title}} — DAC 成本
+        <span class="badge">花费 / DAC（按天）</span></div>
+      <canvas id="dacSpecCostChart"></canvas>
+    </div>`;
+
+  if (dacSpecSpendChart) dacSpecSpendChart.destroy();
+  dacSpecSpendChart = new Chart(document.getElementById('dacSpecSpendChart'), {{
+    type: 'bar',
+    data: {{ labels, datasets: [
+      {{label:'花费', data: target.spend_series, backgroundColor:'rgba(79,70,229,0.7)',
+        borderColor:'#4f46e5', borderWidth:1, yAxisID:'ySpend', type:'bar'}},
+      {{label:'DAC 数', data: target.dac_series, borderColor:'#f59e0b',
+        backgroundColor:'transparent', borderWidth:2.5, pointRadius:4, pointHoverRadius:6,
+        tension:0.3, yAxisID:'yDac', type:'line', spanGaps:true}},
+    ]}},
+    options: {{
+      responsive:true, interaction:{{mode:'index',intersect:false}},
+      scales:{{
+        x:{{grid:{{color:'rgba(0,0,0,.05)'}},ticks:{{font:{{size:12}}}}}},
+        ySpend:{{type:'linear',position:'left',
+          title:{{display:true,text:'花费 (USD)',font:{{size:12}}}},
+          grid:{{color:'rgba(0,0,0,.06)'}},
+          ticks:{{callback:v=>'$'+v,font:{{size:11}}}}, min:0}},
+        yDac:{{type:'linear',position:'right',
+          title:{{display:true,text:'DAC 数',font:{{size:12}}}},
+          grid:{{drawOnChartArea:false}},
+          ticks:{{font:{{size:11}}}}, min:0}},
+      }},
+      plugins:{{
+        legend:{{position:'top',labels:{{font:{{size:12}},usePointStyle:true,pointStyleWidth:12}}}},
+        tooltip:{{mode:'index',intersect:false,
+          callbacks:{{label:ctx=>{{
+            const v=ctx.parsed.y;
+            if(v===null||v===undefined) return null;
+            return ctx.dataset.yAxisID==='ySpend'
+              ? ctx.dataset.label+': $'+v.toLocaleString()
+              : ctx.dataset.label+': '+v;
+          }}}}}},
+        datalabels:{{display:false}},
       }},
     }},
   }});
 
-  // D1P趋势图
-  const d1pSeries = d.d1p_series || {{}};
-  const hasD1p = Object.keys(d1pSeries).length > 0;
-  const d1pBox = document.getElementById('d1p-chart-box');
-  if (d1pBox) d1pBox.style.display = hasD1p ? 'block' : 'none';
-  if (hasD1p) {{
-    const d1pDs = Object.entries(d1pSeries).map(([country, vals], i) => {{
-      const [rv, gv, bv] = DAC_PALETTE[i % DAC_PALETTE.length];
-      return {{
-        label: country, data: vals,
-        borderColor: `rgb(${{rv}},${{gv}},${{bv}})`,
-        backgroundColor: 'transparent',
-        borderWidth: 2.5, pointRadius: 4, pointHoverRadius: 6,
-        tension: 0.3, spanGaps: true,
-      }};
-    }});
-    if (d1pChart) d1pChart.destroy();
-    d1pChart = new Chart(document.getElementById('d1pChart'), {{
-      type: 'line', data: {{ labels, datasets: d1pDs }},
-      options: {{
-        responsive: true, interaction: {{ mode: 'index', intersect: false }},
-        scales: {{
-          x: {{ grid: {{ color: 'rgba(0,0,0,.05)' }}, ticks: {{ font: {{ size: 12 }} }} }},
-          y: {{
-            title: {{ display: true, text: 'D1P成本 (USD)', font: {{ size: 12 }} }},
-            ticks: {{ callback: v => "$" + v, font: {{ size: 11 }} }}, min: 0,
-          }},
-        }},
-        plugins: {{
-          legend: {{ position: 'top', labels: {{ font: {{ size: 12 }}, usePointStyle: true, pointStyleWidth: 12 }} }},
-          tooltip: {{ callbacks: {{ label: ctx => {{
-            const v = ctx.parsed.y;
-            return v != null ? ctx.dataset.label + ': $' + v : null;
-          }} }} }},
-          datalabels: {{ display: false }},
-        }},
+  if (dacSpecCostChart) dacSpecCostChart.destroy();
+  dacSpecCostChart = new Chart(document.getElementById('dacSpecCostChart'), {{
+    type: 'line',
+    data: {{ labels, datasets: [{{
+      label: 'DAC 成本', data: target.cost_series,
+      borderColor:'#4f46e5', backgroundColor:'rgba(79,70,229,0.07)', fill:true,
+      borderWidth:2.5, pointRadius:5, pointHoverRadius:7, tension:0.3, spanGaps:true,
+    }}] }},
+    options: {{
+      responsive:true, interaction:{{mode:'index',intersect:false}},
+      scales:{{
+        x:{{grid:{{color:'rgba(0,0,0,.05)'}},ticks:{{font:{{size:12}}}}}},
+        y:{{title:{{display:true,text:'DAC 成本 (USD)',font:{{size:12}}}},
+          ticks:{{callback:v=>'$'+v,font:{{size:11}}}}, min:0}},
       }},
-    }});
-  }}
+      plugins:{{
+        legend:{{display:false}},
+        tooltip:{{callbacks:{{label:ctx=>ctx.parsed.y!=null?'DAC 成本: $'+ctx.parsed.y:null}}}},
+        datalabels:{{display:true, formatter:v=>v!=null?'$'+v:null,
+          color:'#4f46e5', font:{{size:11,weight:'700'}},
+          anchor:'top', align:'top', offset:3,
+          backgroundColor:'rgba(255,255,255,0.85)', borderRadius:3,
+          padding:{{top:2,bottom:2,left:4,right:4}}}},
+      }},
+    }},
+  }});
 }}
 
 // ── 交互 ────────────────────────────────────────────────────────────────────
+function selectProject(p){{selProject=p;renderProject();}}
 function selectCountry(c){{selCountry=c;renderCountry();}}
 function selectGroup(g){{selGroup=g;renderCampaign();}}
 
@@ -1206,9 +1464,8 @@ renderAll();
 # ─── 主程序 ───────────────────────────────────────────────────────────────────
 def main():
     records      = load_data()
-    dac_records  = load_country_dac_data()
     data         = build_data(records)
-    dac_data     = build_dac_data(dac_records)
+    dac_data     = build_dac_data(records)
     all_signals, overall_roi = compute_all_signals(records)
 
     data_json        = json.dumps(data,        ensure_ascii=False)
