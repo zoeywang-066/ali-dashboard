@@ -71,6 +71,13 @@ def load_data():
         print(f"  过滤其他渠道(criteo)+脏数据: -{before - len(records)} 行 ({len(excluded)} 个 campaign)")
     return records
 
+# 已知表头关键词集合（用于数据行污染检测）
+HEADER_KEYWORDS = {
+    "ds", "campaign_name", "campaign_namedsp", "campaign_id",
+    "花费", "costdsp", "24h_dac", "session_dac", "dac成本",
+    "24h-gmvroi", "24h_gmvroi",
+}
+
 def _load_xlsx(path):
     import pandas as pd
     print(f"读取 xlsx: {path.name}  sheet={SHEET_NAME}")
@@ -80,13 +87,42 @@ def _load_xlsx(path):
     header_idxs = [i for i, row in raw.iterrows()
                    if str(row.iloc[0]).strip().lower() == "ds"]
     if not header_idxs:
+        print("  ❌ 警告：未找到任何 header 行（首列='ds'）")
         return []
 
+    print(f"  检测到 {len(header_idxs)} 个数据段")
+
+    REQUIRED_FIELDS = {
+        "spend(花费/costdsp)":         ["花费", "costdsp"],
+        "campaign_name":               ["campaign_name", "campaign_namedsp"],
+        "campaign_id":                 ["campaign_id"],
+    }
+    OPTIONAL_FIELDS = {
+        "dac(24h_dac/session_dac)":    ["24h_dac", "session_dac"],
+        "dac_cost":                    ["dac成本"],
+        "roi(24h-gmvroi)":             ["24h-gmvroi", "24h_gmvroi"],
+    }
+
     all_records = []
+    warnings = []
+    sec_stats = []  # [(sec_i, h_i, parsed, contaminated, missing)]
+
     for sec_i, h_i in enumerate(header_idxs):
         end_i = header_idxs[sec_i + 1] if sec_i + 1 < len(header_idxs) else len(raw)
         cols  = [str(v).strip() for v in raw.iloc[h_i].tolist()]
         cm    = {c: ci for ci, c in enumerate(cols) if c not in ("nan", "None", "")}
+
+        # ★ 校验1：必需字段
+        missing_required = [lbl for lbl, cands in REQUIRED_FIELDS.items()
+                            if not any(c in cm for c in cands)]
+        if missing_required:
+            warnings.append(f"  ⚠️  段#{sec_i+1} (行{h_i+1}) 缺少必需字段: {', '.join(missing_required)}")
+
+        # ★ 校验2：可选字段（仅提示，不阻塞）
+        missing_optional = [lbl for lbl, cands in OPTIONAL_FIELDS.items()
+                            if not any(c in cm for c in cands)]
+        if missing_optional and sec_i < 3:  # 只对前 3 段报告可选字段缺失，避免噪音
+            warnings.append(f"  ℹ️  段#{sec_i+1} (行{h_i+1}) 缺少可选字段: {', '.join(missing_optional)}")
 
         # 花费列：花费 > costdsp
         spend_i    = cm.get("花费",        cm.get("costdsp"))
@@ -107,15 +143,37 @@ def _load_xlsx(path):
             try: return float(str(v).replace(",", "")) if v is not None else None
             except: return None
 
+        sec_parsed = 0
+        sec_contaminated = 0
         for row_i in range(h_i + 1, end_i):
             row = raw.iloc[row_i]
             try:
                 ds_raw = str(row.iloc[0]).strip().split(".")[0]
                 if not ds_raw.isdigit() or len(ds_raw) != 8:
                     continue
-                name  = _gv(row, name_i) or ""
+
+                # ★ 校验3：字段污染检测
+                # 检查 name 字段是否是表头关键词（说明这行是混入的字段行）
+                name_val = _gv(row, name_i)
+                if name_val and name_val.lower() in HEADER_KEYWORDS:
+                    sec_contaminated += 1
+                    warnings.append(
+                        f"  ⚠️  段#{sec_i+1} 行{row_i+1}: name='{name_val}' 疑似表头污染，已剔除"
+                    )
+                    continue
+
+                # 检查 spend 列是否是字符串关键词（说明列对错了或行错位）
+                spend_raw = _gv(row, spend_i)
+                if spend_raw and spend_raw.lower() in HEADER_KEYWORDS:
+                    sec_contaminated += 1
+                    warnings.append(
+                        f"  ⚠️  段#{sec_i+1} 行{row_i+1}: spend='{spend_raw}' 列错位/污染，已剔除"
+                    )
+                    continue
+
+                name  = name_val or ""
                 cid   = _gv(row, cid_i) or ""
-                spend = _tf(_gv(row, spend_i)) or 0.0
+                spend = _tf(spend_raw) or 0.0
                 roi   = _tf(_gv(row, roi_i))
                 dac   = _tf(_gv(row, dac_i)) or 0.0
                 # dac成本：新格式直接读取；旧格式留 None（由 build_dac_data 按汇总计算）
@@ -124,8 +182,39 @@ def _load_xlsx(path):
                     "ds": ds_raw, "name": name, "cid": cid,
                     "spend": spend, "roi": roi, "dac": dac, "dac_cost": dac_cost,
                 })
-            except Exception:
+                sec_parsed += 1
+            except Exception as e:
+                warnings.append(f"  ⚠️  段#{sec_i+1} 行{row_i+1} 解析异常: {e}")
                 continue
+
+        sec_stats.append((sec_i + 1, h_i + 1, sec_parsed, sec_contaminated, len(missing_required)))
+
+    # ★ 打印校验报告
+    if warnings:
+        print("─── 数据校验警告 ───")
+        # 限制告警条数，避免刷屏
+        for w in warnings[:30]:
+            print(w)
+        if len(warnings) > 30:
+            print(f"  ... 还有 {len(warnings) - 30} 条警告未显示")
+        print("──────────────────")
+
+    # 段级行数统计（若段间差异大可能是数据问题）
+    if sec_stats:
+        parsed_counts = [s[2] for s in sec_stats]
+        total_contaminated = sum(s[3] for s in sec_stats)
+        sections_with_issues = sum(1 for s in sec_stats if s[3] > 0 or s[4] > 0)
+        if total_contaminated > 0 or sections_with_issues > 0:
+            print(f"  校验汇总: {sections_with_issues}/{len(sec_stats)} 段有问题, "
+                  f"共剔除 {total_contaminated} 行污染数据")
+        # 异常段（行数远低于中位数）告警
+        if len(parsed_counts) >= 3:
+            sorted_counts = sorted(parsed_counts)
+            median = sorted_counts[len(sorted_counts) // 2]
+            outliers = [s for s in sec_stats if median > 0 and s[2] < median * 0.3 and s[2] > 0]
+            if outliers:
+                detail = ", ".join(f"段#{s[0]}={s[2]}行" for s in outliers)
+                print(f"  ⚠️  段行数偏低(中位数={median}): {detail}")
 
     print(f"加载 {len(all_records)} 行数据")
     return all_records
