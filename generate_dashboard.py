@@ -903,25 +903,15 @@ canvas{{max-height:340px}}
 
 <!-- ══ 国家面板 ══ -->
 <div id="panel-country" class="panel">
-  <div class="section-title">国家汇总</div>
-  <div class="view-controls">
-    <div class="ctrl-grp"><span class="ctrl-lbl">指标</span>
-      <div class="seg" id="country-metric">
-        <button data-metric="spend" onclick="setCountryMetric('spend')">消耗</button>
-        <button data-metric="roi" onclick="setCountryMetric('roi')">ROI</button>
-      </div>
-    </div>
-    <div class="ctrl-grp">
-      <button class="mini-btn" onclick="allCountries()">全选</button>
-      <button class="mini-btn" onclick="clearCountries()">清空</button>
-    </div>
-    <span class="ctrl-lbl" id="country-sel-info"></span>
+  <div class="section-title">
+    国家汇总
+    <span id="clear-country" class="clear-btn" style="display:none" onclick="selectCountry(null)">✕ 清除筛选</span>
   </div>
   <div id="country-cards" class="cards"></div>
   <div class="chart-box">
     <div class="chart-hd" id="country-chart-title">国家日消耗（柱堆叠）& ROI（线）<span class="badge">左轴: 消耗 USD · 右轴: ROI</span></div>
     <canvas id="countryChart"></canvas>
-    <div class="note">卡片可多选（点一下选中/取消）；用「全选 / 清空」批量调整，再按需要增减</div>
+    <div class="note">点击国家卡片单独查看；再次点击或点 ✕ 取消筛选</div>
   </div>
   <div id="proj-ref-box" class="chart-box" style="display:none">
     <div class="chart-hd">项目整体趋势（参考）<span class="badge">同期</span></div>
@@ -931,23 +921,22 @@ canvas{{max-height:340px}}
 
 <!-- ══ Campaign 面板 ══ -->
 <div id="panel-campaign" class="panel">
-  <div class="section-title">选择国家 / 项目</div>
+  <div class="section-title">
+    选择国家 / 项目
+    <span id="clear-camp" class="clear-btn" style="display:none" onclick="selectGroup(null)">✕ 清除</span>
+  </div>
   <div class="view-controls">
     <div class="ctrl-grp"><span class="ctrl-lbl">指标</span>
       <div class="seg" id="camp-metric">
+        <button data-metric="both" onclick="setCampMetric('both')">消耗+ROI</button>
         <button data-metric="spend" onclick="setCampMetric('spend')">消耗</button>
         <button data-metric="roi" onclick="setCampMetric('roi')">ROI</button>
       </div>
     </div>
-    <div class="ctrl-grp">
-      <button class="mini-btn" onclick="allGroups()">全选</button>
-      <button class="mini-btn" onclick="clearGroups()">清空</button>
-    </div>
-    <span class="ctrl-lbl" id="camp-sel-info"></span>
   </div>
   <div id="group-chips" class="group-chips"></div>
   <div id="camp-chart-area">
-    <div class="empty-hint">👆 选择上方国家/项目（可多选），或点「全选」查看所有 Campaign 趋势</div>
+    <div class="empty-hint">👆 选择上方某个国家或项目，查看其全部 Campaign 趋势</div>
   </div>
 </div>
 
@@ -995,10 +984,9 @@ let sigPeriod  = 7;  // 信号对比窗口: 1 / 3 / 7
 let dacPeriod      = 3;
 let activeTab      = "home";
 let selProject     = null;
-let selCountries   = new Set();
-let selGroups      = new Set();
-let countryMetric  = "spend";
-let campMetric     = "spend";
+let selCountry     = null;
+let selGroup       = null;
+let campMetric     = "both";
 let selDacCountry  = null;
 let selDacSpecial  = null;
 
@@ -1190,42 +1178,39 @@ function renderCountry() {{
   const cards = document.getElementById("country-cards");
   cards.innerHTML = "";
   const days = d.labels.length;
-  const isSpend = countryMetric === "spend";
-  const entries = Object.entries(d.country_summary).sort((a,b)=> isSpend
-    ? (b[1].spend||0)-(a[1].spend||0)
-    : (b[1].roi||0)-(a[1].roi||0));
-  entries.forEach(([lbl,s])=>{{
+  Object.entries(d.country_summary).sort((a,b)=>(b[1].spend||0)-(a[1].spend||0))
+    .forEach(([lbl,s])=>{{
       const daily = days > 0 ? Math.round((s.spend||0)/days).toLocaleString() : "-";
       const div=document.createElement("div");
-      div.className="card"+(selCountries.has(lbl)?" selected":"");
+      div.className="card"+(selCountry===lbl?" selected":"");
       div.innerHTML=`<div class="name">${{lbl}}</div>
         <div class="spend">$${{(s.spend||0).toLocaleString()}}</div>
         <div class="roi">日均: $${{daily}} · ROI: ${{s.roi!=null?s.roi+"x":"-"}}</div>`;
-      div.onclick=()=>toggleCountry(lbl);
+      div.onclick=()=>selectCountry(lbl===selCountry?null:lbl);
       cards.appendChild(div);
     }});
 
-  document.querySelectorAll("#country-metric button").forEach(b=>
-    b.classList.toggle("active", b.dataset.metric===countryMetric));
-  document.getElementById("country-sel-info").textContent =
-    "已选 " + selCountries.size + " / " + entries.length + " 个国家";
-
-  const ds = d.country_ds.filter(x =>
-    selCountries.has(x.label) && x.yAxisID===(isSpend?"ySpend":"yROI"));
-  const title = document.getElementById("country-chart-title");
-  if (selCountries.size === 0) {{
-    title.innerHTML = `国家${{isSpend?"日消耗":"日 ROI"}}<span class="badge">未选择 — 点卡片或「全选」</span>`;
-  }} else {{
-    title.innerHTML = `国家${{isSpend?"日消耗（柱）":"日 ROI（线）"}} · 已选 ${{selCountries.size}} 个`
-      + `<span class="badge">${{isSpend?"左轴: 消耗 USD":"右轴: ROI"}}</span>`;
-  }}
-  countryChart=makeChart("countryChart",ds,d.labels,countryChart,
-    {{spendAxis:isSpend, roiAxis:!isSpend, dataLabels: !isSpend && selCountries.size<=6}});
-
-  if (selCountries.size === 1) {{
+  if (selCountry && d.country_raw[selCountry]) {{
+    const raw=d.country_raw[selCountry];
+    const cc=d.c_colors[selCountry]||{{bar:"rgba(99,102,241,.75)",line:"#4f46e5"}};
+    const ds=[
+      {{label:selCountry,data:raw.spend,backgroundColor:cc.bar,borderColor:cc.line,
+        borderWidth:1,yAxisID:"ySpend",type:"bar",stack:"spend"}},
+      {{label:selCountry+" ROI",data:raw.roi,borderColor:cc.line,backgroundColor:"transparent",
+        borderWidth:2.5,pointRadius:4,pointHoverRadius:6,tension:0.3,
+        yAxisID:"yROI",type:"line",spanGaps:true}},
+    ];
+    document.getElementById("country-chart-title").innerHTML=
+      `${{selCountry}} 日消耗（柱）& ROI（线）<span class="badge">左轴: 消耗 USD · 右轴: ROI</span>`;
+    countryChart=makeChart("countryChart",ds,d.labels,countryChart);
+    document.getElementById("clear-country").style.display="inline";
     document.getElementById("proj-ref-box").style.display="block";
     projRefChart=makeChart("projRefChart",d.proj_ds,d.labels,projRefChart);
   }} else {{
+    document.getElementById("country-chart-title").innerHTML=
+      `国家日消耗（柱堆叠）& ROI（线）<span class="badge">左轴: 消耗 USD · 右轴: ROI</span>`;
+    countryChart=makeChart("countryChart",d.country_ds,d.labels,countryChart);
+    document.getElementById("clear-country").style.display="none";
     document.getElementById("proj-ref-box").style.display="none";
   }}
 }}
@@ -1233,49 +1218,49 @@ function renderCountry() {{
 // ── Campaign 面板 ────────────────────────────────────────────────────────────
 function renderCampaign() {{
   const d=ALL[String(period)];
-  const isSpend = campMetric === "spend";
   const chips=document.getElementById("group-chips");
   chips.innerHTML="";
   Object.keys(d.proj_summary).sort().forEach(lbl=>chips.appendChild(makeChip(lbl,d.proj_summary[lbl],true)));
-  Object.entries(d.country_summary).sort((a,b)=> isSpend
-    ? (b[1].spend||0)-(a[1].spend||0)
-    : (b[1].roi||0)-(a[1].roi||0))
+  Object.entries(d.country_summary).sort((a,b)=>(b[1].spend||0)-(a[1].spend||0))
     .forEach(([lbl,s])=>chips.appendChild(makeChip(lbl,s,false)));
 
   document.querySelectorAll("#camp-metric button").forEach(b=>
     b.classList.toggle("active", b.dataset.metric===campMetric));
 
-  const groups=[...selGroups].filter(g=>d.camp_ds[g]);
-  document.getElementById("camp-sel-info").textContent =
-    "已选 " + groups.length + " 个国家/项目";
-
   const area=document.getElementById("camp-chart-area");
-  if (groups.length===0) {{
-    area.innerHTML=`<div class="empty-hint">👆 选择上方国家/项目（可多选），或点「全选」查看所有 Campaign 趋势</div>`;
+  if (!selGroup || !d.camp_ds[selGroup]) {{
+    area.innerHTML=`<div class="empty-hint">👆 选择上方某个国家或项目，查看其全部 Campaign 趋势</div>`;
     campChart=null;
+    document.getElementById("clear-camp").style.display="none";
     return;
   }}
-  let ds=[];
-  groups.forEach(g=>{{
-    d.camp_ds[g].filter(x=>x.yAxisID===(isSpend?"ySpend":"yROI")).forEach(x=>ds.push(x));
-  }});
+  document.getElementById("clear-camp").style.display="inline";
+
+  const showSpend = campMetric !== "roi";
+  const showRoi   = campMetric !== "spend";
+  const ds = d.camp_ds[selGroup].filter(x =>
+    (x.yAxisID==="ySpend" && showSpend) || (x.yAxisID==="yROI" && showRoi));
+  const metricTxt = campMetric==="both" ? "日消耗（柱）& ROI（线）"
+                  : campMetric==="spend" ? "日消耗（柱）" : "日 ROI（线）";
+  const axisTxt = campMetric==="both" ? "左轴: 消耗 USD · 右轴: ROI"
+                : campMetric==="spend" ? "左轴: 消耗 USD" : "右轴: ROI";
   area.innerHTML=`<div class="chart-box">
-    <div class="chart-hd">${{groups.length}} 个国家/项目 — Campaign ${{isSpend?"日消耗（柱）":"日 ROI（线）"}}
-      <span class="badge">${{isSpend?"左轴: 消耗 USD":"右轴: ROI"}} · 图例可点击隐藏</span></div>
+    <div class="chart-hd">${{selGroup}} — Campaign ${{metricTxt}}
+      <span class="badge">${{axisTxt}} · 图例可点击隐藏</span></div>
     <canvas id="campChart"></canvas>
-    <div class="note">图例可点击隐藏/显示单个 Campaign；上方 chip 可增减国家/项目</div>
+    <div class="note">图例可点击隐藏/显示单个 Campaign；ROI 线带数值</div>
   </div>`;
   campChart=makeChart("campChart",ds,d.labels,null,
-    {{spendAxis:isSpend, roiAxis:!isSpend, dataLabels:false}});
+    {{spendAxis:showSpend, roiAxis:showRoi, dataLabels:showRoi}});
 }}
 
 function makeChip(lbl,s,isProj) {{
   const chip=document.createElement("div");
-  chip.className="chip"+(isProj?" proj":"")+(selGroups.has(lbl)?" selected":"");
+  chip.className="chip"+(isProj?" proj":"")+(selGroup===lbl?" selected":"");
   const spend=(s.spend||0)>0?"  $"+(s.spend||0).toLocaleString():"";
   chip.innerHTML=`<strong>${{lbl}}</strong>${{spend}}`;
   chip.title=`均 ROI: ${{s.roi!=null?s.roi+"x":"-"}}`;
-  chip.onclick=()=>toggleGroup(lbl);
+  chip.onclick=()=>selectGroup(lbl===selGroup?null:lbl);
   return chip;
 }}
 
@@ -1580,16 +1565,9 @@ function renderDacSpecial() {{
 
 // ── 交互 ────────────────────────────────────────────────────────────────────
 function selectProject(p){{selProject=p;renderProject();}}
-
-function toggleCountry(c){{ selCountries.has(c) ? selCountries.delete(c) : selCountries.add(c); renderCountry(); }}
-function setCountryMetric(m){{ countryMetric=m; renderCountry(); }}
-function allCountries(){{ selCountries=new Set(Object.keys(ALL[String(period)].country_summary)); renderCountry(); }}
-function clearCountries(){{ selCountries=new Set(); renderCountry(); }}
-
-function toggleGroup(g){{ selGroups.has(g) ? selGroups.delete(g) : selGroups.add(g); renderCampaign(); }}
-function setCampMetric(m){{ campMetric=m; renderCampaign(); }}
-function allGroups(){{ const d=ALL[String(period)]; selGroups=new Set([...Object.keys(d.proj_summary),...Object.keys(d.country_summary)].filter(g=>d.camp_ds[g])); renderCampaign(); }}
-function clearGroups(){{ selGroups=new Set(); renderCampaign(); }}
+function selectCountry(c){{selCountry=c;renderCountry();}}
+function selectGroup(g){{selGroup=g;renderCampaign();}}
+function setCampMetric(m){{campMetric=m;renderCampaign();}}
 
 function setPeriod(n){{
   period=n;
@@ -1619,11 +1597,6 @@ function renderAll(){{
 }}
 
 // 默认全选：进入即看到所有国家 / Campaign（消耗口径），再按需调整
-(function initSelections(){{
-  const d = ALL[String(period)];
-  selCountries = new Set(Object.keys(d.country_summary)); // 国家视图默认全选（消耗口径）
-  selGroups = new Set();                                   // Campaign 视图默认空，点「全选」或 chip 选择
-}})();
 renderAll();
 </script>
 </body>
