@@ -101,6 +101,7 @@ def _load_xlsx(path):
         "dac(24h_dac/session_dac)":    ["24h_dac", "session_dac"],
         "dac_cost":                    ["dac成本"],
         "roi(24h-gmvroi)":             ["24h-gmvroi", "24h_gmvroi"],
+        "gmv(24h_gmv)":                ["24h_gmv"],
     }
 
     all_records = []
@@ -127,6 +128,7 @@ def _load_xlsx(path):
         # 花费列：花费 > costdsp
         spend_i    = cm.get("花费",        cm.get("costdsp"))
         roi_i      = cm.get("24h-gmvroi",  cm.get("24h_gmvroi"))
+        gmv_i      = cm.get("24h_gmv")
         # DAC列：优先 24h_dac（新格式），其次 session_dac
         dac_i      = cm.get("24h_dac",     cm.get("session_dac"))
         # dac成本：新格式直接提供
@@ -175,12 +177,13 @@ def _load_xlsx(path):
                 cid   = _gv(row, cid_i) or ""
                 spend = _tf(spend_raw) or 0.0
                 roi   = _tf(_gv(row, roi_i))
+                gmv   = _tf(_gv(row, gmv_i))   # 24h_gmv 金额，用于项目/国家聚合 ROI = Σgmv/Σ花费
                 dac   = _tf(_gv(row, dac_i)) or 0.0
                 # dac成本：新格式直接读取；旧格式留 None（由 build_dac_data 按汇总计算）
                 dac_cost = _tf(_gv(row, dac_cost_i)) if dac_cost_i is not None else None
                 all_records.append({
                     "ds": ds_raw, "name": name, "cid": cid,
-                    "spend": spend, "roi": roi, "dac": dac, "dac_cost": dac_cost,
+                    "spend": spend, "roi": roi, "gmv": gmv, "dac": dac, "dac_cost": dac_cost,
                 })
                 sec_parsed += 1
             except Exception as e:
@@ -414,8 +417,8 @@ def get_window(records, n):
 # ─── 聚合 ────────────────────────────────────────────────────────────────────
 def aggregate(records, dates):
     date_set    = set(dates)
-    proj_agg    = defaultdict(lambda: defaultdict(lambda: {"spend":0,"ws":0,"wsr":0}))
-    country_agg = defaultdict(lambda: defaultdict(lambda: {"spend":0,"ws":0,"wsr":0}))
+    proj_agg    = defaultdict(lambda: defaultdict(lambda: {"spend":0,"gmv":0}))
+    country_agg = defaultdict(lambda: defaultdict(lambda: {"spend":0,"gmv":0}))
     camp_agg    = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: {"spend":0,"ws":0,"wsr":0})))
     cid_to_short = {}
 
@@ -425,26 +428,26 @@ def aggregate(records, dates):
         target = proj_agg[label] if kind == "project" else country_agg[label]
         b = target[r["ds"]]
         b["spend"] += r["spend"]
-        if r["roi"] and r["roi"] > 0 and r["spend"] > 0:
-            b["ws"]  += r["spend"]
-            b["wsr"] += r["roi"] * r["spend"]
+        b["gmv"]   += (r.get("gmv") or 0)          # 项目/国家聚合 ROI = Σ24h_gmv / Σ花费
         sn = cid_to_short.setdefault(r["cid"], short_name(r["name"]))
         cb = camp_agg[label][sn][r["ds"]]
         cb["spend"] += r["spend"]
-        if r["roi"] and r["roi"] > 0 and r["spend"] > 0:
+        if r["roi"] and r["roi"] > 0 and r["spend"] > 0:   # 单 campaign 仍直接用 24h-gmvroi 字段
             cb["ws"]  += r["spend"]
             cb["wsr"] += r["roi"] * r["spend"]
 
     def to_series(agg_dict):
         result = {}
         for label, ds_map in agg_dict.items():
-            spend_list, roi_list = [], []
+            spend_list, roi_list, gmv_list = [], [], []
             for d in dates:
-                b = ds_map.get(d, {"spend":0,"ws":0,"wsr":0})
-                spend_list.append(round(b["spend"], 2))
-                roi_list.append(round(b["wsr"]/b["ws"], 2) if b["ws"] > 0 else None)
+                b = ds_map.get(d, {"spend":0,"gmv":0})
+                sp = round(b["spend"], 2); gm = round(b.get("gmv", 0), 2)
+                spend_list.append(sp); gmv_list.append(gm)
+                # 当日聚合 ROI = 当日 Σ24h_gmv / 当日 Σ花费
+                roi_list.append(round(gm / b["spend"], 2) if b["spend"] > 0 else None)
             if sum(s for s in spend_list if s) > 0:
-                result[label] = {"spend": spend_list, "roi": roi_list}
+                result[label] = {"spend": spend_list, "roi": roi_list, "gmv": gmv_list}
         return result
 
     def to_camp_series():
@@ -665,10 +668,14 @@ def build_data(records):
             return bars + lines
 
         def summ(series):
-            return {lbl: {"spend": round(sum(s for s in d["spend"] if s),0),
-                          "roi": round(sum(v for v in d["roi"] if v)/len([v for v in d["roi"] if v]),2)
-                                 if any(v for v in d["roi"] if v) else None}
-                    for lbl, d in series.items()}
+            out = {}
+            for lbl, d in series.items():
+                tot_spend = sum(s for s in d["spend"] if s)
+                tot_gmv   = sum(g for g in d.get("gmv", []) if g)
+                # 整体（窗口）ROI = Σ24h_gmv / Σ花费（花费加权，不是每日 ROI 简单平均）
+                out[lbl] = {"spend": round(tot_spend, 0),
+                            "roi":   round(tot_gmv / tot_spend, 2) if tot_spend > 0 else None}
+            return out
 
         all_camp_ds = {g: make_camp_ds(gc) for g, gc in campaigns.items()}
 
