@@ -717,7 +717,7 @@ def build_data(records):
 
         all_camp_ds = {g: make_camp_ds(gc) for g, gc in campaigns.items()}
         platform_ds = [
-            {"label": "costdsp", "data": platform["spend"],
+            {"label": "平台消耗(costdsp)", "data": platform["spend"],
              "backgroundColor": "rgba(14,165,233,0.42)", "borderColor": "#0ea5e9",
              "borderWidth": 1, "yAxisID": "ySpend", "type": "bar", "stack": "spend"},
             {"label": "平台 ROI", "data": platform["roi"],
@@ -913,10 +913,10 @@ canvas{{max-height:340px}}
 <div id="panel-home" class="panel active">
   <div id="kpi-bar" class="kpi-bar"></div>
   <div class="chart-box">
-    <div class="chart-hd">Moloco 平台整体 ROI 趋势
-      <span class="badge">Σ24h_gmv / Σcostdsp</span></div>
+    <div class="chart-hd">整体平台消耗（柱）& ROI（线）趋势
+      <span class="badge">左轴: costdsp USD · 右轴: ROI · Σ24h_gmv / Σcostdsp</span></div>
     <canvas id="platformRoiChart"></canvas>
-    <div class="note">按天汇总所有 Moloco campaign；costdsp 兼容表内 costdsp / 花费字段</div>
+    <div class="note">整体平台维度：按天汇总所有 Moloco campaign 的 costdsp 与 24h_gmv</div>
   </div>
   <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">
     <span style="font-size:13px;color:#64748b;font-weight:500">信号对比：</span>
