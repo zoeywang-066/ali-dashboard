@@ -13,13 +13,12 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 from pathlib import Path
 
-DESKTOP      = Path.home() / "Desktop"
 DOWNLOADS    = Path.home() / "Downloads"
 REPO_DIR     = Path.home() / "ali-dashboard"
 OUTPUT_FILE  = str(REPO_DIR / "index.html")
 XLSX_FILE    = DOWNLOADS / "aliexpress_moloco_compaign_data.xlsx"
-CSV_FILE     = DESKTOP / "阿里投放数据.csv"
-NUMBERS_FILE = DESKTOP / "阿里投放数据.numbers"
+CSV_FILE     = DOWNLOADS / "aliexpress_moloco_compaign_data.csv"
+NUMBERS_FILE = DOWNLOADS / "阿里投放数据.numbers"
 SHEET_NAME   = "最新"
 
 # ─── 数据过滤 ────────────────────────────────────────────────────────────────
