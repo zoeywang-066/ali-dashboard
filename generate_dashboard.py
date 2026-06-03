@@ -468,6 +468,43 @@ def aggregate(records, dates):
 
     return to_series(proj_agg), to_series(country_agg), to_camp_series()
 
+def build_platform_series(records, dates):
+    date_set = set(dates)
+    daily = defaultdict(lambda: {"spend": 0.0, "gmv": 0.0, "gmv_rows": 0})
+
+    for r in records:
+        if r["ds"] not in date_set:
+            continue
+        b = daily[r["ds"]]
+        b["spend"] += r["spend"]
+        gmv = r.get("gmv")
+        if gmv is not None:
+            b["gmv"] += gmv
+            b["gmv_rows"] += 1
+
+    spend_list, gmv_list, roi_list = [], [], []
+    for d in dates:
+        b = daily.get(d, {"spend": 0.0, "gmv": 0.0, "gmv_rows": 0})
+        spend = round(b["spend"], 2)
+        gmv = round(b["gmv"], 2)
+        spend_list.append(spend)
+        gmv_list.append(gmv)
+        roi_list.append(round(gmv / spend, 2) if spend > 0 and b["gmv_rows"] > 0 else None)
+
+    total_spend = sum(spend_list)
+    total_gmv = sum(gmv_list)
+    total_gmv_rows = sum(b["gmv_rows"] for b in daily.values())
+    return {
+        "spend": spend_list,
+        "gmv": gmv_list,
+        "roi": roi_list,
+        "summary": {
+            "spend": round(total_spend, 0),
+            "gmv": round(total_gmv, 0),
+            "roi": round(total_gmv / total_spend, 2) if total_spend > 0 and total_gmv_rows > 0 else None,
+        },
+    }
+
 def fmt_dates(dates):
     return [f"{d[4:6]}/{d[6:8]}" for d in dates]
 
@@ -637,6 +674,7 @@ def build_data(records):
         dates  = get_window(records, n)
         labels = fmt_dates(dates)
         proj, country, campaigns = aggregate(records, dates)
+        platform = build_platform_series(records, dates)
 
         def make_ds(series, colors_map):
             bars, lines = [], []
@@ -678,9 +716,19 @@ def build_data(records):
             return out
 
         all_camp_ds = {g: make_camp_ds(gc) for g, gc in campaigns.items()}
+        platform_ds = [
+            {"label": "costdsp", "data": platform["spend"],
+             "backgroundColor": "rgba(14,165,233,0.42)", "borderColor": "#0ea5e9",
+             "borderWidth": 1, "yAxisID": "ySpend", "type": "bar", "stack": "spend"},
+            {"label": "平台 ROI", "data": platform["roi"],
+             "borderColor": "#059669", "backgroundColor": "transparent",
+             "borderWidth": 3, "pointRadius": 4, "pointHoverRadius": 6, "tension": 0.3,
+             "yAxisID": "yROI", "type": "line", "spanGaps": True},
+        ]
 
         result[str(n)] = {
             "labels":          labels,
+            "platform":        {**platform, "ds": platform_ds},
             "proj_ds":         make_ds(proj,    all_colors),
             "country_ds":      make_ds(country, all_colors),
             "proj_summary":    summ(proj),
@@ -864,6 +912,12 @@ canvas{{max-height:340px}}
 <!-- ══ 首页 ══ -->
 <div id="panel-home" class="panel active">
   <div id="kpi-bar" class="kpi-bar"></div>
+  <div class="chart-box">
+    <div class="chart-hd">Moloco 平台整体 ROI 趋势
+      <span class="badge">Σ24h_gmv / Σcostdsp</span></div>
+    <canvas id="platformRoiChart"></canvas>
+    <div class="note">按天汇总所有 Moloco campaign；costdsp 兼容表内 costdsp / 花费字段</div>
+  </div>
   <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">
     <span style="font-size:13px;color:#64748b;font-weight:500">信号对比：</span>
     <button class="spbtn" onclick="setSigPeriod(1)">对比昨天</button>
@@ -990,7 +1044,7 @@ let campMetric     = "both";
 let selDacCountry  = null;
 let selDacSpecial  = null;
 
-let projChart=null, countryChart=null, projRefChart=null, campChart=null;
+let platformChart=null, projChart=null, countryChart=null, projRefChart=null, campChart=null;
 let dacTrendChart=null, dacCampChart=null;
 let dacSpecSpendChart=null, dacSpecCostChart=null;
 
@@ -1058,9 +1112,11 @@ function setSigPeriod(n) {{
 
 function renderHome() {{
   const d = ALL[String(period)];
-  const meta7 = ALL_SIGNALS["7"].meta;
-  const allSpend = Object.values(d.group_summary).reduce((s,x)=>s+(x.spend||0),0);
+  const platformSummary = (d.platform || {{}}).summary || {{}};
+  const fallbackSpend = Object.values(d.group_summary).reduce((s,x)=>s+(x.spend||0),0);
+  const allSpend = platformSummary.spend != null ? platformSummary.spend : fallbackSpend;
   const dailyAvg = (allSpend / d.labels.length).toFixed(0);
+  const platformRoi = platformSummary.roi != null ? platformSummary.roi + "x" : "-";
   const issues7   = ALL_SIGNALS["7"].signals.filter(s=>["critical","warning"].includes(s.level));
   const opps7     = ALL_SIGNALS["7"].signals.filter(s=>s.level==="opportunity");
   const anomalies7= ALL_SIGNALS["7"].signals.filter(s=>s.level==="anomaly");
@@ -1072,9 +1128,9 @@ function renderHome() {{
     <div class="kpi"><div class="k-label">日均消耗</div>
       <div class="k-val">$${{Number(dailyAvg).toLocaleString()}}</div>
       <div class="k-sub" style="color:#64748b">USD / 天</div></div>
-    <div class="kpi"><div class="k-label">整体平均 ROI</div>
-      <div class="k-val">${{meta7.overall_roi}}x</div>
-      <div class="k-sub" style="color:#64748b">近7天加权</div></div>
+    <div class="kpi"><div class="k-label">Moloco平台 ROI</div>
+      <div class="k-val">${{platformRoi}}</div>
+      <div class="k-sub" style="color:#64748b">Σ24h_gmv / Σcostdsp</div></div>
     <div class="kpi red"><div class="k-label">需关注项</div>
       <div class="k-val">${{issues7.length}}</div>
       <div class="k-sub" style="color:#dc2626">ROI下滑 / 持续偏低</div></div>
@@ -1085,7 +1141,13 @@ function renderHome() {{
       <div class="k-val">${{anomalies7.length}}</div>
       <div class="k-sub" style="color:#d97706">需核实数据</div></div>`;
 
+  renderPlatformTrend(d);
   renderSignals();
+}}
+
+function renderPlatformTrend(d) {{
+  if (!d.platform || !d.platform.ds) return;
+  platformChart = makeChart("platformRoiChart", d.platform.ds, d.labels, platformChart);
 }}
 
 function renderSignals() {{
