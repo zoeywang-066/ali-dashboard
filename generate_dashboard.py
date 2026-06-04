@@ -297,8 +297,8 @@ def build_dac_data(records):
         # country → camp_short → day → {cost, dac}
         c_camp  = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: {"cost": 0.0, "dac": 0.0})))
         # DAC 专项：整体 + 分 campaign
-        sp_overall = defaultdict(lambda: {"cost": 0.0, "dac": 0.0})           # ds → {cost, dac}
-        sp_camp    = defaultdict(lambda: defaultdict(lambda: {"cost": 0.0, "dac": 0.0}))  # camp_short → ds → {cost, dac}
+        sp_overall = defaultdict(lambda: {"cost": 0.0, "dac": 0.0, "gmv": 0.0})           # ds → {cost, dac, gmv}
+        sp_camp    = defaultdict(lambda: defaultdict(lambda: {"cost": 0.0, "dac": 0.0, "gmv": 0.0}))  # camp_short → ds → {cost, dac, gmv}
 
         for r in records:
             if r["ds"] not in date_set:
@@ -316,8 +316,10 @@ def build_dac_data(records):
             if "DAC专项" in (r.get("name") or ""):
                 sp_overall[r["ds"]]["cost"] += r["spend"]
                 sp_overall[r["ds"]]["dac"]  += r.get("dac") or 0
+                sp_overall[r["ds"]]["gmv"]  += r.get("gmv") or 0
                 sp_camp[sn][r["ds"]]["cost"] += r["spend"]
                 sp_camp[sn][r["ds"]]["dac"]  += r.get("dac") or 0
+                sp_camp[sn][r["ds"]]["gmv"]  += r.get("gmv") or 0
 
         # Country summary（窗口合计）
         country_summary = {}
@@ -361,35 +363,49 @@ def build_dac_data(records):
             cost_s  = [round(ds_map[d]["cost"] / ds_map[d]["dac"], 2)
                        if ds_map.get(d, {}).get("dac", 0) > 0 else None
                        for d in dates]
-            return spend_s, dac_s, cost_s
+            gmv_s   = [round(ds_map.get(d, {}).get("gmv", 0), 2) for d in dates]
+            roi_s   = [round(ds_map[d]["gmv"] / ds_map[d]["cost"], 2)
+                       if ds_map.get(d, {}).get("cost", 0) > 0 else None
+                       for d in dates]
+            return spend_s, dac_s, cost_s, gmv_s, roi_s
 
         dac_special = {}
         if sp_overall:
             tc = sum(b["cost"] for b in sp_overall.values())
             td = sum(b["dac"]  for b in sp_overall.values())
-            sp_s, dc_s, cs_s = _series(sp_overall)
+            tg = sum(b["gmv"]  for b in sp_overall.values())
+            sp_s, dc_s, cs_s, gm_s, ro_s = _series(sp_overall)
             dac_special["overall"] = {
                 "cost":         round(tc, 0),
                 "dac":          int(round(td, 0)),
                 "dac_cost":     round(tc / td, 2) if td > 0 else None,
+                "gmv":          round(tg, 0),
+                "roi":          round(tg / tc, 2) if tc > 0 else None,
                 "daily_spend":  round(tc / n, 0),
                 "spend_series": sp_s,
                 "dac_series":   dc_s,
                 "cost_series":  cs_s,
+                "gmv_series":   gm_s,
+                "roi_series":   ro_s,
             }
             camps = {}
             for camp, ds_map in sp_camp.items():
                 tc2 = sum(b["cost"] for b in ds_map.values())
                 td2 = sum(b["dac"]  for b in ds_map.values())
-                sp2, dc2, cs2 = _series(ds_map)
+                tg2 = sum(b["gmv"]  for b in ds_map.values())
+                sp2, dc2, cs2, gm2, ro2 = _series(ds_map)
                 camps[camp] = {
                     "cost":         round(tc2, 0),
                     "dac":          int(round(td2, 0)),
                     "dac_cost":     round(tc2 / td2, 2) if td2 > 0 else None,
+                    "gmv":          round(tg2, 0),
+                    "roi":          round(tg2 / tc2, 2) if tc2 > 0 else None,
                     "daily_spend":  round(tc2 / n, 0),
                     "spend_series": sp2,
                     "dac_series":   dc2,
                     "cost_series":  cs2,
+                    "gmv_series":   gm2,
+                    "roi_series":   ro2,
                 }
             dac_special["campaigns"] = camps
 
@@ -1017,7 +1033,7 @@ canvas{{max-height:340px}}
   </div>
   <div id="dac-special-cards" class="cards"></div>
   <div id="dac-special-chart-area">
-    <div class="empty-hint">👆 点击「整体」或单个 campaign 卡片，查看 DAC数 / 花费 / DAC成本 分天趋势</div>
+    <div class="empty-hint">👆 点击「整体」或单个 campaign 卡片，查看 DAC数 / 花费 / DAC成本 / 24H GMV / ROI 分天趋势</div>
   </div>
 </div>
 
@@ -1045,7 +1061,7 @@ let selDacSpecial  = null;
 
 let platformChart=null, projChart=null, countryChart=null, projRefChart=null, campChart=null;
 let dacTrendChart=null, dacCampChart=null;
-let dacSpecSpendChart=null, dacSpecCostChart=null;
+let dacSpecSpendChart=null, dacSpecCostChart=null, dacSpecRoiChart=null;
 
 if (typeof ChartDataLabels !== "undefined") Chart.register(ChartDataLabels);
 
@@ -1497,6 +1513,7 @@ function renderDacSpecial() {{
     area.innerHTML = '';
     if (dacSpecSpendChart) {{ dacSpecSpendChart.destroy(); dacSpecSpendChart = null; }}
     if (dacSpecCostChart)  {{ dacSpecCostChart.destroy();  dacSpecCostChart  = null; }}
+    if (dacSpecRoiChart)   {{ dacSpecRoiChart.destroy();   dacSpecRoiChart   = null; }}
     const clr = document.getElementById('clear-dac-special');
     if (clr) clr.style.display = 'none';
     return;
@@ -1512,7 +1529,8 @@ function renderDacSpecial() {{
   ovDiv.innerHTML = `<div class="name">🎯 整体</div>
     <div class="spend">$${{ov.dac_cost ?? '-'}}</div>
     <div class="roi">日均消耗: $${{(ov.daily_spend||0).toLocaleString()}} · 总花费: $${{ov.cost.toLocaleString()}}</div>
-    <div class="roi">DAC: ${{ov.dac}}</div>`;
+    <div class="roi">DAC: ${{ov.dac}}</div>
+    <div class="roi">24H GMV: $${{(ov.gmv||0).toLocaleString()}} · ROI: ${{ov.roi!=null?ov.roi+'x':'-'}}</div>`;
   ovDiv.onclick = () => selectDacSpecial(ovSel ? null : '__overall__');
   cardsEl.appendChild(ovDiv);
 
@@ -1527,7 +1545,8 @@ function renderDacSpecial() {{
       div.innerHTML = `<div class="name">${{camp}}</div>
         <div class="spend">$${{s.dac_cost ?? '-'}}</div>
         <div class="roi">日均消耗: $${{(s.daily_spend||0).toLocaleString()}} · 总花费: $${{s.cost.toLocaleString()}}</div>
-        <div class="roi">DAC: ${{s.dac}}</div>`;
+        <div class="roi">DAC: ${{s.dac}}</div>
+        <div class="roi">24H GMV: $${{(s.gmv||0).toLocaleString()}} · ROI: ${{s.roi!=null?s.roi+'x':'-'}}</div>`;
       div.onclick = () => selectDacSpecial(sel ? null : camp);
       cardsEl.appendChild(div);
     }});
@@ -1537,9 +1556,10 @@ function renderDacSpecial() {{
 
   // 趋势图
   if (!selDacSpecial) {{
-    area.innerHTML = '<div class="empty-hint">👆 点击「整体」或单个 campaign 卡片，查看 DAC数 / 花费 / DAC成本 分天趋势</div>';
+    area.innerHTML = '<div class="empty-hint">👆 点击「整体」或单个 campaign 卡片，查看 DAC数 / 花费 / DAC成本 / 24H GMV / ROI 分天趋势</div>';
     if (dacSpecSpendChart) {{ dacSpecSpendChart.destroy(); dacSpecSpendChart = null; }}
     if (dacSpecCostChart)  {{ dacSpecCostChart.destroy();  dacSpecCostChart  = null; }}
+    if (dacSpecRoiChart)   {{ dacSpecRoiChart.destroy();   dacSpecRoiChart   = null; }}
     return;
   }}
   const target = selDacSpecial === '__overall__' ? ov : (camps[selDacSpecial] || null);
@@ -1551,6 +1571,12 @@ function renderDacSpecial() {{
       <div class="chart-hd">${{title}} — 花费 & DAC 数
         <span class="badge">左轴: 花费 USD · 右轴: DAC 数</span></div>
       <canvas id="dacSpecSpendChart"></canvas>
+    </div>
+    <div class="chart-box">
+      <div class="chart-hd">${{title}} — 24H GMV & ROI
+        <span class="badge">左轴: 24H GMV USD · 右轴: ROI</span></div>
+      <canvas id="dacSpecRoiChart"></canvas>
+      <div class="note">ROI = 当日 Σ24h_gmv / 当日 Σ花费</div>
     </div>
     <div class="chart-box">
       <div class="chart-hd">${{title}} — DAC 成本
@@ -1592,6 +1618,49 @@ function renderDacSpecial() {{
               : ctx.dataset.label+': '+v;
           }}}}}},
         datalabels:{{display:false}},
+      }},
+    }},
+  }});
+
+  if (dacSpecRoiChart) dacSpecRoiChart.destroy();
+  dacSpecRoiChart = new Chart(document.getElementById('dacSpecRoiChart'), {{
+    type: 'bar',
+    data: {{ labels, datasets: [
+      {{label:'24H GMV', data: target.gmv_series || [], backgroundColor:'rgba(14,165,233,0.58)',
+        borderColor:'#0ea5e9', borderWidth:1, yAxisID:'yGmv', type:'bar'}},
+      {{label:'ROI', data: target.roi_series || [], borderColor:'#059669',
+        backgroundColor:'transparent', borderWidth:2.5, pointRadius:4, pointHoverRadius:6,
+        tension:0.3, yAxisID:'yROI', type:'line', spanGaps:true}},
+    ]}},
+    options: {{
+      responsive:true, interaction:{{mode:'index',intersect:false}},
+      scales:{{
+        x:{{grid:{{color:'rgba(0,0,0,.05)'}},ticks:{{font:{{size:12}}}}}},
+        yGmv:{{type:'linear',position:'left',
+          title:{{display:true,text:'24H GMV (USD)',font:{{size:12}}}},
+          grid:{{color:'rgba(0,0,0,.06)'}},
+          ticks:{{callback:v=>'$'+v.toLocaleString(),font:{{size:11}}}}, min:0}},
+        yROI:{{type:'linear',position:'right',
+          title:{{display:true,text:'ROI (x)',font:{{size:12}}}},
+          grid:{{drawOnChartArea:false}},
+          ticks:{{callback:v=>v+'x',font:{{size:11}}}}, min:0}},
+      }},
+      plugins:{{
+        legend:{{position:'top',labels:{{font:{{size:12}},usePointStyle:true,pointStyleWidth:12}}}},
+        tooltip:{{mode:'index',intersect:false,
+          callbacks:{{label:ctx=>{{
+            const v=ctx.parsed.y;
+            if(v===null||v===undefined) return null;
+            return ctx.dataset.yAxisID==='yGmv'
+              ? ctx.dataset.label+': $'+v.toLocaleString()
+              : ctx.dataset.label+': '+v+'x';
+          }}}}}},
+        datalabels:{{display:ctx=>ctx.dataset.yAxisID==='yROI',
+          formatter:v=>v!=null?v+'x':null,
+          color:'#059669', font:{{size:11,weight:'700'}},
+          anchor:'top', align:'top', offset:3,
+          backgroundColor:'rgba(255,255,255,0.85)', borderRadius:3,
+          padding:{{top:2,bottom:2,left:4,right:4}}}},
       }},
     }},
   }});
