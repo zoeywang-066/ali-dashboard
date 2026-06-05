@@ -444,7 +444,11 @@ def aggregate(records, dates):
         b = target[r["ds"]]
         b["spend"] += r["spend"]
         b["gmv"]   += (r.get("gmv") or 0)          # 项目/国家聚合 ROI = Σ24h_gmv / Σ花费
-        sn = cid_to_short.setdefault(r["cid"], short_name(r["name"]))
+        cid = str(r.get("cid") or "").strip()
+        if cid:
+            sn = cid_to_short.setdefault((kind, label, cid), short_name(r["name"]))
+        else:
+            sn = short_name(r["name"])
         cb = camp_agg[label][sn][r["ds"]]
         cb["spend"] += r["spend"]
         if r["roi"] and r["roi"] > 0 and r["spend"] > 0:   # 单 campaign 仍直接用 24h-gmvroi 字段
