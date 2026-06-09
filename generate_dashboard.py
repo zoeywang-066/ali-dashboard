@@ -20,6 +20,9 @@ XLSX_FILE    = DOWNLOADS / "aliexpress_moloco_compaign_data.xlsx"
 CSV_FILE     = DOWNLOADS / "aliexpress_moloco_compaign_data.csv"
 NUMBERS_FILE = DOWNLOADS / "阿里投放数据.numbers"
 SHEET_NAME   = "最新"
+HISTORY_FILE = REPO_DIR / "data" / "ae_history_20251001_20260111.csv"
+HISTORY_START = "20251001"
+HISTORY_END   = "20260111"
 
 # ─── 数据过滤 ────────────────────────────────────────────────────────────────
 def is_other_channel(name):
@@ -33,13 +36,21 @@ def is_other_channel(name):
     return False
 
 # ─── 分类 & 名称 ─────────────────────────────────────────────────────────────
-def classify(name):
+def classify(name, geo=None):
     if not name: return ("country", "未知")
     if "EU10"    in name: return ("project", "EU10")
     if "海托"    in name: return ("project", "海托")
     if "欧洲本地" in name: return ("project", "欧洲本地")
+    if re.search(r'Synapse[_\s]+全托', name, re.IGNORECASE):
+        return ("project", "Synapse_全托")
     m = re.search(r'[Aa]ndroid[_\s][Aa]pp[_\s]([A-Z]{1,5}(?:/[A-Z]{1,5})?)', name, re.IGNORECASE)
     if m: return ("country", m.group(1).upper())
+    m = re.search(r'全托[_\s]([A-Z]{1,5})(?:[_\s]|$)', name, re.IGNORECASE)
+    if m: return ("country", m.group(1).upper())
+    if geo:
+        g = str(geo).strip().upper()
+        if g and g not in ("-", "NAN", "NONE", "未匹配"):
+            return ("country", g)
     return ("country", "OTHER")
 
 def short_name(name):
@@ -63,6 +74,14 @@ def load_data():
         print(f"错误：找不到数据文件\n  {XLSX_FILE}\n  {CSV_FILE}\n  {NUMBERS_FILE}")
         sys.exit(1)
 
+    current_count = len(records)
+    if HISTORY_FILE.exists():
+        history_records = _load_history_csv(HISTORY_FILE, HISTORY_START, HISTORY_END)
+        records = _merge_records(history_records, records)
+        print(f"  合并历史 AE数据: +{len(history_records)} 行历史, 当前下载 {current_count} 行, 合并后 {len(records)} 行")
+    else:
+        print(f"  未找到历史 AE数据文件，跳过: {HISTORY_FILE}")
+
     before = len(records)
     excluded = {r["name"] for r in records if is_other_channel(r["name"])}
     records = [r for r in records if not is_other_channel(r["name"])]
@@ -72,7 +91,7 @@ def load_data():
 
 # 已知表头关键词集合（用于数据行污染检测）
 HEADER_KEYWORDS = {
-    "ds", "campaign_name", "campaign_namedsp", "campaign_id",
+    "ds", "统计时间", "campaign_name", "campaign_namedsp", "campaign_id",
     "花费", "costdsp", "24h_dac", "session_dac", "dac成本",
     "24h-gmvroi", "24h_gmvroi", "sess-gmvroi",
 }
@@ -92,6 +111,29 @@ def _find_col(cm, candidates):
         if idx is not None:
             return idx
     return None
+
+def _to_float(v):
+    try:
+        if v is None:
+            return None
+        s = str(v).strip().replace(",", "")
+        if s in ("", "-", "nan", "NaN", "None", "NONE"):
+            return None
+        return float(s)
+    except Exception:
+        return None
+
+def _merge_records(*record_sets):
+    """合并历史和当前数据；同一日期/campaign/name 重叠时，后传入的数据优先。"""
+    merged = {}
+    order = []
+    for records in record_sets:
+        for r in records:
+            key = (r.get("ds"), str(r.get("cid") or ""), str(r.get("name") or ""))
+            if key not in merged:
+                order.append(key)
+            merged[key] = r
+    return [merged[k] for k in order if k in merged]
 
 def _resolve_gmv_roi_cols(raw, h_i, end_i, cm, spend_i):
     """每个数据段独立识别 GMV/ROI 列，防止同一 sheet 中表头位置变化或错位。"""
@@ -232,6 +274,7 @@ def _load_xlsx(path):
         dac_cost_i = _find_col(cm, ["dac成本"])
         name_i     = _find_col(cm, ["campaign_name", "campaign_namedsp"])
         cid_i      = _find_col(cm, ["campaign_id"])
+        geo_i      = _find_col(cm, ["geo type", "geo_type", "country", "country_code"])
 
         def _gv(row, idx):
             if idx is None: return None
@@ -272,15 +315,19 @@ def _load_xlsx(path):
 
                 name  = name_val or ""
                 cid   = _gv(row, cid_i) or ""
+                geo   = _gv(row, geo_i) or ""
                 spend = _tf(spend_raw) or 0.0
                 roi   = _tf(_gv(row, roi_i))
                 gmv   = _tf(_gv(row, gmv_i))   # 24h_gmv 金额，用于项目/国家聚合 ROI = Σgmv/Σ花费
+                if roi is None and gmv is not None and spend > 0:
+                    roi = gmv / spend
                 dac   = _tf(_gv(row, dac_i)) or 0.0
                 # dac成本：新格式直接读取；旧格式留 None（由 build_dac_data 按汇总计算）
                 dac_cost = _tf(_gv(row, dac_cost_i)) if dac_cost_i is not None else None
                 all_records.append({
                     "ds": ds_raw, "name": name, "cid": cid,
                     "spend": spend, "roi": roi, "gmv": gmv, "dac": dac, "dac_cost": dac_cost,
+                    "geo": geo,
                 })
                 sec_parsed += 1
             except Exception as e:
@@ -354,39 +401,120 @@ def _load_numbers(path):
         spend = float(spend_v) if isinstance(spend_v, (int, float)) else 0.0
         gmv   = float(gmv_v)   if isinstance(gmv_v,   (int, float)) else None
         roi   = float(roi_v)   if isinstance(roi_v,   (int, float)) else None
-        records.append({"ds": ds, "name": name, "cid": cid, "spend": spend, "roi": roi, "gmv": gmv, "dac": 0, "dac_cost": None})
+        if roi is None and gmv is not None and spend > 0:
+            roi = gmv / spend
+        records.append({"ds": ds, "name": name, "cid": cid, "spend": spend, "roi": roi, "gmv": gmv, "dac": 0, "dac_cost": None, "geo": ""})
     print(f"加载 {len(records)} 行数据")
     return records
 
-def _df_to_records(df):
+def _load_history_csv(path, start_ds, end_ds):
+    import pandas as pd
+    print(f"读取历史 AE数据: {path.name}  {start_ds}~{end_ds}")
+    df = pd.read_csv(path, dtype=str)
+    df.columns = [str(c).strip() for c in df.columns]
+    return _df_to_records(df, start_ds=start_ds, end_ds=end_ds)
+
+def _resolve_df_gmv_roi_cols(df, cm, ds_i, spend_i):
+    """单表 CSV/历史数据的 GMV/ROI 字段识别，兼容 ROI 列为空或 GMV/ROI 错位。"""
+    gmv_names = [
+        "24h_gmv", "24h-gmv", "24hgmv", "gmv24", "gmv_24h",
+        "24h-gmvroi", "24h_gmvroi",
+    ]
+    roi_names = [
+        "24h-gmvroi", "24h_gmvroi", "24h_roi", "24hroi", "roi24",
+        "sess-gmvroi", "sess_gmvroi", "session_gmvroi", "商业roi",
+    ]
+    gmv_candidates = []
+    roi_candidates = []
+    for name in gmv_names:
+        idx = _find_col(cm, [name])
+        if idx is not None and (name, idx) not in gmv_candidates:
+            gmv_candidates.append((name, idx))
+    for name in roi_names:
+        idx = _find_col(cm, [name])
+        if idx is not None and (name, idx) not in roi_candidates:
+            roi_candidates.append((name, idx))
+
+    best = None
+    sample_end = min(len(df), 200)
+    for gmv_name, gmv_i in gmv_candidates:
+        for roi_name, roi_i in roi_candidates:
+            if gmv_i == roi_i:
+                continue
+            errors = []
+            for row_i in range(sample_end):
+                row = df.iloc[row_i]
+                ds_raw = str(row.iloc[ds_i]).strip().split(".")[0] if ds_i is not None else ""
+                if not ds_raw.isdigit() or len(ds_raw) != 8:
+                    continue
+                spend = _to_float(row.iloc[spend_i]) if spend_i is not None else None
+                gmv = _to_float(row.iloc[gmv_i]) if gmv_i is not None else None
+                roi = _to_float(row.iloc[roi_i]) if roi_i is not None else None
+                if not spend or spend <= 0 or gmv is None or roi is None or roi <= 0:
+                    continue
+                errors.append(abs((gmv / spend) - roi) / max(abs(roi), 0.01))
+            if len(errors) < 3:
+                continue
+            errors.sort()
+            median_err = errors[len(errors) // 2]
+            score = (median_err, -len(errors))
+            if best is None or score < best["score"]:
+                best = {"gmv_i": gmv_i, "roi_i": roi_i, "score": score, "median_err": median_err}
+
+    if best and best["median_err"] <= 0.08:
+        return best["gmv_i"], best["roi_i"]
+
+    gmv_i = _find_col(cm, ["24h_gmv", "24h-gmv", "24hgmv", "gmv24", "gmv_24h"])
+    if gmv_i is None:
+        gmv_i = _find_col(cm, ["24h-gmvroi", "24h_gmvroi"])
+    roi_i = _find_col(cm, ["24h-gmvroi", "24h_gmvroi", "24h_roi", "sess-gmvroi", "商业roi"])
+    if roi_i == gmv_i:
+        roi_i = _find_col(cm, ["sess-gmvroi", "sess_gmvroi", "session_gmvroi", "商业roi"])
+    return gmv_i, roi_i
+
+def _df_to_records(df, start_ds=None, end_ds=None):
     """CSV / Numbers 备用加载路径（xlsx 走 _load_xlsx 逐 section 解析）"""
     records = []
-    if "sess-gmvroi" in df.columns and "24h-gmvroi" in df.columns:
-        gmv_col = "24h-gmvroi"
-        roi_col = "sess-gmvroi"
-    else:
-        gmv_col = next((c for c in df.columns if c in ("24h_gmv", "24h-gmv", "gmv24")), None)
-        roi_col = next((c for c in df.columns if "24h-gmvroi" in c or "24h_gmvroi" in c or "sess-gmvroi" in c), None)
-    spend_col    = next((c for c in df.columns if c in ("花费", "spend", "costdsp")), None)
-    dac_col      = next((c for c in df.columns if c in ("24h_dac", "session_dac")), None)
-    dac_cost_col = next((c for c in df.columns if c == "dac成本"), None)
+    cm = {str(c).strip(): i for i, c in enumerate(df.columns)}
+    ds_i        = _find_col(cm, ["ds", "统计时间", "date", "local date", "local_date"])
+    name_i      = _find_col(cm, ["campaign_name", "campaign_namedsp", "campaign name"])
+    cid_i       = _find_col(cm, ["campaign_id", "campaignid", "campaign id"])
+    spend_i     = _find_col(cm, ["花费", "spend", "costdsp", "cost"])
+    dac_i       = _find_col(cm, ["24h_dac", "session_dac", "dac"])
+    dac_cost_i  = _find_col(cm, ["dac成本", "dac_cost", "dac cost"])
+    geo_i       = _find_col(cm, ["geo type", "geo_type", "country", "country_code"])
+    gmv_i, roi_i = _resolve_df_gmv_roi_cols(df, cm, ds_i, spend_i)
+
+    def _value(row, idx):
+        if idx is None:
+            return ""
+        v = row.iloc[idx]
+        if v is None:
+            return ""
+        s = str(v).strip()
+        return "" if s in ("nan", "NaN", "None") else s
+
     for _, row in df.iterrows():
         try:
-            ds_raw = str(row.get("ds", "")).strip().split(".")[0]
-            if not ds_raw.isdigit() or len(ds_raw) != 8: continue
-            name     = str(row.get("campaign_name", row.get("campaign_namedsp", "")) or "")
-            cid      = str(row.get("campaign_id", "") or "")
-            spend    = float(str(row.get(spend_col, 0) or 0).replace(",", "")) if spend_col else 0.0
-            roi_raw  = row.get(roi_col) if roi_col else None
-            roi      = float(roi_raw) if roi_raw not in (None, "", "nan", "None") else None
-            gmv_raw  = row.get(gmv_col) if gmv_col else None
-            gmv      = float(str(gmv_raw).replace(",", "")) if gmv_raw not in (None, "", "nan", "None") else None
-            dac_raw  = row.get(dac_col) if dac_col else None
-            dac      = float(str(dac_raw).replace(",", "")) if dac_raw not in (None, "", "nan", "None") else 0.0
-            dc_raw   = row.get(dac_cost_col) if dac_cost_col else None
-            dac_cost = float(str(dc_raw).replace(",", "")) if dc_raw not in (None, "", "nan", "None") else None
+            ds_raw = _value(row, ds_i).split(".")[0]
+            if not ds_raw.isdigit() or len(ds_raw) != 8:
+                continue
+            if start_ds and ds_raw < start_ds:
+                continue
+            if end_ds and ds_raw > end_ds:
+                continue
+            name     = _value(row, name_i)
+            cid      = _value(row, cid_i)
+            geo      = _value(row, geo_i)
+            spend    = _to_float(_value(row, spend_i)) or 0.0
+            roi      = _to_float(_value(row, roi_i)) if roi_i is not None else None
+            gmv      = _to_float(_value(row, gmv_i)) if gmv_i is not None else None
+            if roi is None and gmv is not None and spend > 0:
+                roi = gmv / spend
+            dac      = _to_float(_value(row, dac_i)) or 0.0
+            dac_cost = _to_float(_value(row, dac_cost_i)) if dac_cost_i is not None else None
             records.append({"ds": ds_raw, "name": name, "cid": cid,
-                            "spend": spend, "roi": roi, "gmv": gmv, "dac": dac, "dac_cost": dac_cost})
+                            "spend": spend, "roi": roi, "gmv": gmv, "dac": dac, "dac_cost": dac_cost, "geo": geo})
         except (ValueError, TypeError):
             continue
     print(f"加载 {len(records)} 行数据")
@@ -418,7 +546,7 @@ def build_dac_data(records):
             # 只用有 dac成本 直接字段的记录（24h_dac 口径），session_dac 不参与
             if r.get("dac_cost") is None:
                 continue
-            _, label = classify(r["name"])
+            _, label = classify(r["name"], r.get("geo"))
             sn = short_name(r["name"])
             c_daily[label][r["ds"]]["cost"] += r["spend"]
             c_daily[label][r["ds"]]["dac"]  += r.get("dac") or 0
@@ -564,7 +692,7 @@ def aggregate(records, dates):
 
     for r in records:
         if r["ds"] not in date_set: continue
-        kind, label = classify(r["name"])
+        kind, label = classify(r["name"], r.get("geo"))
         target = proj_agg[label] if kind == "project" else country_agg[label]
         b = target[r["ds"]]
         b["spend"] += r["spend"]
@@ -671,7 +799,7 @@ def _compute_signals_for_window(records, compare_days):
     agg = defaultdict(lambda: {"r_spend":0,"r_ws":0,"r_wsr":0,"p_spend":0,"p_ws":0,"p_wsr":0})
 
     for r in records:
-        _, label = classify(r["name"])
+        _, label = classify(r["name"], r.get("geo"))
         sn = cid_to_short.setdefault(r["cid"], short_name(r["name"]))
         camp_key = f"{label}|||{sn}"
         for key in (label, camp_key):
@@ -694,7 +822,7 @@ def _compute_signals_for_window(records, compare_days):
     daily_roi = defaultdict(lambda: defaultdict(lambda: {"ws":0,"wsr":0}))
     for r in records:
         if r["ds"] not in recent_dates: continue
-        _, label = classify(r["name"])
+        _, label = classify(r["name"], r.get("geo"))
         if r["roi"] and r["roi"]>0 and r["spend"]>0:
             daily_roi[label][r["ds"]]["ws"]  += r["spend"]
             daily_roi[label][r["ds"]]["wsr"] += r["roi"] * r["spend"]
@@ -802,7 +930,7 @@ def country_color(i):
 def build_data(records):
     all_countries, all_projects = set(), set()
     for r in records:
-        kind, label = classify(r["name"])
+        kind, label = classify(r["name"], r.get("geo"))
         (all_projects if kind == "project" else all_countries).add(label)
 
     country_list = sorted(all_countries)
