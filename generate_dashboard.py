@@ -74,8 +74,102 @@ def load_data():
 HEADER_KEYWORDS = {
     "ds", "campaign_name", "campaign_namedsp", "campaign_id",
     "花费", "costdsp", "24h_dac", "session_dac", "dac成本",
-    "24h-gmvroi", "24h_gmvroi",
+    "24h-gmvroi", "24h_gmvroi", "sess-gmvroi",
 }
+
+def _norm_col(name):
+    return re.sub(r"[\s_\-]+", "", str(name or "").strip().lower())
+
+def _find_col(cm, candidates):
+    """按原始表头或规范化表头查列，兼容空格/下划线/连字符变化。"""
+    if not candidates:
+        return None
+    norm_map = {_norm_col(k): v for k, v in cm.items()}
+    for cand in candidates:
+        if cand in cm:
+            return cm[cand]
+        idx = norm_map.get(_norm_col(cand))
+        if idx is not None:
+            return idx
+    return None
+
+def _resolve_gmv_roi_cols(raw, h_i, end_i, cm, spend_i):
+    """每个数据段独立识别 GMV/ROI 列，防止同一 sheet 中表头位置变化或错位。"""
+    gmv_names = [
+        "24h_gmv", "24h-gmv", "24hgmv", "gmv24", "gmv_24h",
+        "24h-gmvroi", "24h_gmvroi", "24h GMV",
+    ]
+    roi_names = [
+        "24h-gmvroi", "24h_gmvroi", "24h_roi", "24hroi", "roi24",
+        "sess-gmvroi", "sess_gmvroi", "session_gmvroi", "商业roi",
+    ]
+    gmv_candidates = []
+    roi_candidates = []
+    for name in gmv_names:
+        idx = _find_col(cm, [name])
+        if idx is not None and (name, idx) not in gmv_candidates:
+            gmv_candidates.append((name, idx))
+    for name in roi_names:
+        idx = _find_col(cm, [name])
+        if idx is not None and (name, idx) not in roi_candidates:
+            roi_candidates.append((name, idx))
+
+    def _tf_local(v):
+        try:
+            if v is None:
+                return None
+            s = str(v).strip().replace(",", "")
+            if s in ("", "-", "nan", "None"):
+                return None
+            return float(s)
+        except Exception:
+            return None
+
+    def _cell(row, idx):
+        if idx is None or idx >= len(row):
+            return None
+        return _tf_local(row.iloc[idx])
+
+    best = None
+    sample_end = min(end_i, h_i + 101)
+    for gmv_name, gmv_i in gmv_candidates:
+        for roi_name, roi_i in roi_candidates:
+            if gmv_i == roi_i:
+                continue
+            errors = []
+            for row_i in range(h_i + 1, sample_end):
+                row = raw.iloc[row_i]
+                ds_raw = str(row.iloc[0]).strip().split(".")[0]
+                if not ds_raw.isdigit() or len(ds_raw) != 8:
+                    continue
+                spend = _cell(row, spend_i)
+                gmv = _cell(row, gmv_i)
+                roi = _cell(row, roi_i)
+                if not spend or spend <= 0 or gmv is None or roi is None or roi <= 0:
+                    continue
+                calc_roi = gmv / spend
+                if calc_roi <= 0:
+                    continue
+                errors.append(abs(calc_roi - roi) / max(abs(roi), 0.01))
+            if len(errors) < 3:
+                continue
+            errors.sort()
+            median_err = errors[len(errors) // 2]
+            score = (median_err, -len(errors))
+            if best is None or score < best["score"]:
+                best = {
+                    "gmv_i": gmv_i, "roi_i": roi_i,
+                    "gmv_name": gmv_name, "roi_name": roi_name,
+                    "score": score, "median_err": median_err,
+                    "n": len(errors),
+                }
+
+    if best and best["median_err"] <= 0.08:
+        return best["gmv_i"], best["roi_i"], best
+
+    gmv_i = _find_col(cm, ["24h_gmv", "24h-gmv", "24hgmv", "gmv24"])
+    roi_i = _find_col(cm, ["24h-gmvroi", "24h_gmvroi", "24h_roi", "sess-gmvroi"])
+    return gmv_i, roi_i, None
 
 def _load_xlsx(path):
     import pandas as pd
@@ -99,8 +193,8 @@ def _load_xlsx(path):
     OPTIONAL_FIELDS = {
         "dac(24h_dac/session_dac)":    ["24h_dac", "session_dac"],
         "dac_cost":                    ["dac成本"],
-        "roi(24h-gmvroi)":             ["24h-gmvroi", "24h_gmvroi"],
-        "gmv(24h_gmv)":                ["24h_gmv"],
+        "roi(24h/sess gmvroi)":        ["24h-gmvroi", "24h_gmvroi", "sess-gmvroi"],
+        "gmv(24h_gmv/shifted)":        ["24h_gmv", "24h-gmvroi", "24h_gmvroi"],
     }
 
     all_records = []
@@ -125,15 +219,19 @@ def _load_xlsx(path):
             warnings.append(f"  ℹ️  段#{sec_i+1} (行{h_i+1}) 缺少可选字段: {', '.join(missing_optional)}")
 
         # 花费列：花费 > costdsp
-        spend_i    = cm.get("花费",        cm.get("costdsp"))
-        roi_i      = cm.get("24h-gmvroi",  cm.get("24h_gmvroi"))
-        gmv_i      = cm.get("24h_gmv")
+        spend_i    = _find_col(cm, ["花费", "costdsp", "spend"])
+        gmv_i, roi_i, metric_resolution = _resolve_gmv_roi_cols(raw, h_i, end_i, cm, spend_i)
+        if metric_resolution:
+            warnings.append(
+                f"  ℹ️  段#{sec_i+1} (行{h_i+1}) 指标映射: "
+                f"GMV={metric_resolution['gmv_name']} · ROI={metric_resolution['roi_name']}"
+            )
         # DAC列：优先 24h_dac（新格式），其次 session_dac
-        dac_i      = cm.get("24h_dac",     cm.get("session_dac"))
+        dac_i      = _find_col(cm, ["24h_dac", "session_dac", "dac"])
         # dac成本：新格式直接提供
-        dac_cost_i = cm.get("dac成本")
-        name_i     = cm.get("campaign_name", cm.get("campaign_namedsp"))
-        cid_i      = cm.get("campaign_id")
+        dac_cost_i = _find_col(cm, ["dac成本"])
+        name_i     = _find_col(cm, ["campaign_name", "campaign_namedsp"])
+        cid_i      = _find_col(cm, ["campaign_id"])
 
         def _gv(row, idx):
             if idx is None: return None
@@ -247,17 +345,28 @@ def _load_numbers(path):
         name    = table.cell(r, col.get("campaign_name", 2)).value or ""
         cid     = table.cell(r, col.get("campaign_id",   1)).value or ""
         spend_v = table.cell(r, col.get("花费",          5)).value
-        roi_v   = table.cell(r, col.get("24h-gmvroi",   20)).value
+        if "sess-gmvroi" in col and "24h-gmvroi" in col:
+            gmv_v = table.cell(r, col.get("24h-gmvroi")).value
+            roi_v = table.cell(r, col.get("sess-gmvroi")).value
+        else:
+            gmv_v = table.cell(r, col.get("24h_gmv",    19)).value
+            roi_v = table.cell(r, col.get("24h-gmvroi", 20)).value
         spend = float(spend_v) if isinstance(spend_v, (int, float)) else 0.0
+        gmv   = float(gmv_v)   if isinstance(gmv_v,   (int, float)) else None
         roi   = float(roi_v)   if isinstance(roi_v,   (int, float)) else None
-        records.append({"ds": ds, "name": name, "cid": cid, "spend": spend, "roi": roi, "dac": 0, "dac_cost": None})
+        records.append({"ds": ds, "name": name, "cid": cid, "spend": spend, "roi": roi, "gmv": gmv, "dac": 0, "dac_cost": None})
     print(f"加载 {len(records)} 行数据")
     return records
 
 def _df_to_records(df):
     """CSV / Numbers 备用加载路径（xlsx 走 _load_xlsx 逐 section 解析）"""
     records = []
-    roi_col      = next((c for c in df.columns if "24h-gmvroi" in c or "24h_gmvroi" in c), None)
+    if "sess-gmvroi" in df.columns and "24h-gmvroi" in df.columns:
+        gmv_col = "24h-gmvroi"
+        roi_col = "sess-gmvroi"
+    else:
+        gmv_col = next((c for c in df.columns if c in ("24h_gmv", "24h-gmv", "gmv24")), None)
+        roi_col = next((c for c in df.columns if "24h-gmvroi" in c or "24h_gmvroi" in c or "sess-gmvroi" in c), None)
     spend_col    = next((c for c in df.columns if c in ("花费", "spend", "costdsp")), None)
     dac_col      = next((c for c in df.columns if c in ("24h_dac", "session_dac")), None)
     dac_cost_col = next((c for c in df.columns if c == "dac成本"), None)
@@ -270,12 +379,14 @@ def _df_to_records(df):
             spend    = float(str(row.get(spend_col, 0) or 0).replace(",", "")) if spend_col else 0.0
             roi_raw  = row.get(roi_col) if roi_col else None
             roi      = float(roi_raw) if roi_raw not in (None, "", "nan", "None") else None
+            gmv_raw  = row.get(gmv_col) if gmv_col else None
+            gmv      = float(str(gmv_raw).replace(",", "")) if gmv_raw not in (None, "", "nan", "None") else None
             dac_raw  = row.get(dac_col) if dac_col else None
             dac      = float(str(dac_raw).replace(",", "")) if dac_raw not in (None, "", "nan", "None") else 0.0
             dc_raw   = row.get(dac_cost_col) if dac_cost_col else None
             dac_cost = float(str(dc_raw).replace(",", "")) if dc_raw not in (None, "", "nan", "None") else None
             records.append({"ds": ds_raw, "name": name, "cid": cid,
-                            "spend": spend, "roi": roi, "dac": dac, "dac_cost": dac_cost})
+                            "spend": spend, "roi": roi, "gmv": gmv, "dac": dac, "dac_cost": dac_cost})
         except (ValueError, TypeError):
             continue
     print(f"加载 {len(records)} 行数据")
@@ -287,10 +398,11 @@ def build_dac_data(records):
     if not records:
         return {}
     result = {}
-    for n in (3, 7, 14):
-        dates    = get_window(records, n)
+    windows = [("all", get_all_dates(records))] + [(str(n), get_window(records, n)) for n in (3, 7, 14)]
+    for key, dates in windows:
         labels   = fmt_dates(dates)
         date_set = set(dates)
+        window_days = max(len(dates), 1)
 
         # country → day → {cost, dac}
         c_daily = defaultdict(lambda: defaultdict(lambda: {"cost": 0.0, "dac": 0.0}))
@@ -331,17 +443,25 @@ def build_dac_data(records):
                     "cost":        round(tc, 0),
                     "dac":         round(td, 0),
                     "dac_cost":    round(tc / td, 2),
-                    "daily_spend": round(tc / n, 0),
+                    "daily_spend": round(tc / window_days, 0),
                 }
 
         # Country daily series（分天 DAC成本）
         country_daily = {}
+        country_metrics = {}
         for c, ds_map in c_daily.items():
-            series = [round(ds_map[d]["cost"] / ds_map[d]["dac"], 2)
-                      if ds_map.get(d, {}).get("dac", 0) > 0 else None
-                      for d in dates]
-            if any(v is not None for v in series):
-                country_daily[c] = series
+            spend_s = [round(ds_map.get(d, {}).get("cost", 0), 2) for d in dates]
+            dac_s   = [int(round(ds_map.get(d, {}).get("dac", 0), 0)) for d in dates]
+            cost_s  = [round(ds_map[d]["cost"] / ds_map[d]["dac"], 2)
+                       if ds_map.get(d, {}).get("dac", 0) > 0 else None
+                       for d in dates]
+            if any(v is not None for v in cost_s):
+                country_daily[c] = cost_s
+                country_metrics[c] = {
+                    "spend_series": spend_s,
+                    "dac_series":   dac_s,
+                    "cost_series":  cost_s,
+                }
 
         # Camp daily per country
         camp_daily = {}
@@ -381,7 +501,7 @@ def build_dac_data(records):
                 "dac_cost":     round(tc / td, 2) if td > 0 else None,
                 "gmv":          round(tg, 0),
                 "roi":          round(tg / tc, 2) if tc > 0 else None,
-                "daily_spend":  round(tc / n, 0),
+                "daily_spend":  round(tc / window_days, 0),
                 "spend_series": sp_s,
                 "dac_series":   dc_s,
                 "cost_series":  cs_s,
@@ -400,7 +520,7 @@ def build_dac_data(records):
                     "dac_cost":     round(tc2 / td2, 2) if td2 > 0 else None,
                     "gmv":          round(tg2, 0),
                     "roi":          round(tg2 / tc2, 2) if tc2 > 0 else None,
-                    "daily_spend":  round(tc2 / n, 0),
+                    "daily_spend":  round(tc2 / window_days, 0),
                     "spend_series": sp2,
                     "dac_series":   dc2,
                     "cost_series":  cs2,
@@ -409,21 +529,26 @@ def build_dac_data(records):
                 }
             dac_special["campaigns"] = camps
 
-        result[str(n)] = {
+        result[key] = {
+            "dates":           dates,
             "labels":          labels,
             "country_summary": country_summary,
+            "country_metrics": country_metrics,
             "country_daily":   country_daily,
             "camp_daily":      camp_daily,
             "dac_special":     dac_special,
         }
         n_countries = len(country_summary)
         n_special   = len(dac_special.get("campaigns", {})) if dac_special else 0
-        print(f"  [DAC] {n}天窗口: {n_countries} 个国家/项目有 dac成本 数据 · DAC专项 {n_special} 个 campaign")
+        print(f"  [DAC] {key}窗口: {n_countries} 个国家/项目有 dac成本 数据 · DAC专项 {n_special} 个 campaign")
     return result
 
 # ─── 日期窗口 ─────────────────────────────────────────────────────────────────
+def get_all_dates(records):
+    return sorted({r["ds"] for r in records if str(r.get("ds", "")).isdigit()})
+
 def get_window(records, n):
-    all_dates = sorted({r["ds"] for r in records if r["ds"].isdigit()})
+    all_dates = get_all_dates(records)
     if not all_dates: return []
     end_dt   = datetime.strptime(all_dates[-1], "%Y%m%d")
     start_dt = end_dt - timedelta(days=n - 1)
@@ -689,8 +814,8 @@ def build_data(records):
                   **{k:{"bar":bc,"line":lc} for k,(bc,lc) in p_colors.items()}}
 
     result = {}
-    for n in (7, 14, 30):
-        dates  = get_window(records, n)
+    windows = [("all", get_all_dates(records))] + [(str(n), get_window(records, n)) for n in (7, 14, 30)]
+    for key, dates in windows:
         labels = fmt_dates(dates)
         proj, country, campaigns = aggregate(records, dates)
         platform = build_platform_series(records, dates)
@@ -745,7 +870,8 @@ def build_data(records):
              "yAxisID": "yROI", "type": "line", "spanGaps": True},
         ]
 
-        result[str(n)] = {
+        result[key] = {
+            "dates":           dates,
             "labels":          labels,
             "platform":        {**platform, "ds": platform_ds},
             "proj_ds":         make_ds(proj,    all_colors),
@@ -785,6 +911,10 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 .period-bar{{margin-left:auto;display:flex;gap:6px;padding:8px 0;flex-shrink:0}}
 .pbtn{{padding:5px 14px;border-radius:99px;border:1.5px solid #e2e8f0;background:#fff;font-size:13px;cursor:pointer;color:#64748b;transition:all .15s}}
 .pbtn.active{{border-color:#4f46e5;background:#4f46e5;color:#fff}}
+.date-range-bar{{display:flex;align-items:center;gap:6px;margin-left:6px;padding-left:10px;border-left:1px solid #e2e8f0}}
+.date-input{{height:30px;border:1.5px solid #e2e8f0;border-radius:8px;padding:4px 8px;font-size:12px;color:#334155;background:#fff}}
+.date-input:focus{{outline:none;border-color:#4f46e5;box-shadow:0 0 0 2px rgba(79,70,229,.12)}}
+.range-sep{{font-size:12px;color:#94a3b8}}
 .spbtn{{padding:4px 12px;border-radius:99px;border:1.5px solid #e2e8f0;background:#fff;font-size:12px;cursor:pointer;color:#64748b;transition:all .15s}}
 .spbtn.active{{border-color:#0891b2;background:#0891b2;color:#fff}}
 .panel{{display:none;padding:24px 32px}}
@@ -922,9 +1052,15 @@ canvas{{max-height:340px}}
   <div class="tab" onclick="switchTab('campaign')">Campaign 视图</div>
   <div class="tab" onclick="switchTab('dac')">DAC成本</div>
   <div class="period-bar">
-    <button class="pbtn" onclick="setPeriod(7)">过去 7 天</button>
-    <button class="pbtn active" onclick="setPeriod(14)">过去 14 天</button>
-    <button class="pbtn" onclick="setPeriod(30)">过去 30 天</button>
+    <button class="pbtn" data-period="7" onclick="setPeriod(7)">过去 7 天</button>
+    <button class="pbtn active" data-period="14" onclick="setPeriod(14)">过去 14 天</button>
+    <button class="pbtn" data-period="30" onclick="setPeriod(30)">过去 30 天</button>
+    <button class="pbtn" data-period="all" onclick="setPeriod('all')">全部</button>
+    <div class="date-range-bar">
+      <input id="date-start" class="date-input" type="date" onchange="setCustomDateRange()">
+      <span class="range-sep">至</span>
+      <input id="date-end" class="date-input" type="date" onchange="setCustomDateRange()">
+    </div>
   </div>
 </div>
 
@@ -1069,6 +1205,236 @@ let dacSpecSpendChart=null, dacSpecCostChart=null, dacSpecRoiChart=null;
 
 if (typeof ChartDataLabels !== "undefined") Chart.register(ChartDataLabels);
 
+const BASE_DATA = ALL["all"] || ALL["30"] || ALL["14"] || ALL["7"] || {{}};
+const ALL_DATES = BASE_DATA.dates || [];
+let dateStart = null;
+let dateEnd = null;
+
+function dsToInput(ds) {{
+  return ds ? `${{ds.slice(0,4)}}-${{ds.slice(4,6)}}-${{ds.slice(6,8)}}` : "";
+}}
+
+function inputToDs(v) {{
+  return (v || "").replaceAll("-", "");
+}}
+
+function setDateInputs() {{
+  const s = document.getElementById("date-start");
+  const e = document.getElementById("date-end");
+  if (!s || !e || !ALL_DATES.length) return;
+  const min = dsToInput(ALL_DATES[0]);
+  const max = dsToInput(ALL_DATES[ALL_DATES.length - 1]);
+  [s, e].forEach(el => {{ el.min = min; el.max = max; }});
+  s.value = dsToInput(dateStart);
+  e.value = dsToInput(dateEnd);
+}}
+
+function updatePeriodButtons() {{
+  document.querySelectorAll(".pbtn").forEach(b => {{
+    b.classList.toggle("active", String(b.dataset.period) === String(period));
+  }});
+  [3, 7, 14].forEach(d => {{
+    const btn = document.getElementById("dac-btn-" + d);
+    if (btn) btn.classList.toggle("active", String(period) === String(d));
+  }});
+}}
+
+function setRangeToLast(n) {{
+  if (!ALL_DATES.length) return;
+  const endIdx = ALL_DATES.length - 1;
+  const startIdx = Math.max(0, ALL_DATES.length - Number(n));
+  dateStart = ALL_DATES[startIdx];
+  dateEnd = ALL_DATES[endIdx];
+}}
+
+function setFullRange() {{
+  if (!ALL_DATES.length) return;
+  dateStart = ALL_DATES[0];
+  dateEnd = ALL_DATES[ALL_DATES.length - 1];
+}}
+
+function setCustomDateRange() {{
+  const s = inputToDs(document.getElementById("date-start").value);
+  const e = inputToDs(document.getElementById("date-end").value);
+  if (!s || !e) return;
+  dateStart = s <= e ? s : e;
+  dateEnd = s <= e ? e : s;
+  period = "custom";
+  setDateInputs();
+  updatePeriodButtons();
+  renderAll();
+  if (activeTab === "dac") renderDac();
+}}
+
+function setPeriod(n) {{
+  period = n;
+  if (n === "all") setFullRange();
+  else setRangeToLast(n);
+  setDateInputs();
+  updatePeriodButtons();
+  renderAll();
+  if (activeTab === "dac") renderDac();
+}}
+
+function getSliceRange(dates) {{
+  if (!dates || !dates.length) return [0, -1];
+  const start = dateStart || dates[0];
+  const end = dateEnd || dates[dates.length - 1];
+  let s = dates.findIndex(d => d >= start);
+  let e = dates.length - 1;
+  for (let i = dates.length - 1; i >= 0; i--) {{
+    if (dates[i] <= end) {{ e = i; break; }}
+  }}
+  if (s < 0) s = 0;
+  if (e < s) return [0, -1];
+  return [s, e];
+}}
+
+function sliceArr(arr, s, e) {{
+  return (arr || []).slice(s, e + 1);
+}}
+
+function sumVals(arr) {{
+  return (arr || []).reduce((s, v) => s + (Number(v) || 0), 0);
+}}
+
+function sliceDataset(ds, s, e) {{
+  return {{...ds, data: sliceArr(ds.data, s, e)}};
+}}
+
+function sliceSeriesMap(seriesMap, s, e) {{
+  const out = {{}};
+  Object.entries(seriesMap || {{}}).forEach(([k, v]) => {{
+    out[k] = {{
+      ...v,
+      spend: sliceArr(v.spend, s, e),
+      roi:   sliceArr(v.roi,   s, e),
+      gmv:   sliceArr(v.gmv,   s, e),
+    }};
+  }});
+  return out;
+}}
+
+function summarizeSeriesMap(seriesMap) {{
+  const out = {{}};
+  Object.entries(seriesMap || {{}}).forEach(([k, v]) => {{
+    const spend = sumVals(v.spend);
+    const gmv = sumVals(v.gmv);
+    if (spend > 0) out[k] = {{spend: Math.round(spend), roi: gmv > 0 ? Number((gmv / spend).toFixed(2)) : null}};
+  }});
+  return out;
+}}
+
+function getFilteredData() {{
+  const base = BASE_DATA;
+  const dates = base.dates || [];
+  const [s, e] = getSliceRange(dates);
+  if (e < s) return {{...base, dates: [], labels: [], proj_summary: {{}}, country_summary: {{}}, group_summary: {{}}}};
+  const labels = sliceArr(base.labels, s, e);
+  const fd = {{
+    ...base,
+    dates: sliceArr(dates, s, e),
+    labels,
+    proj_ds: (base.proj_ds || []).map(ds => sliceDataset(ds, s, e)),
+    country_ds: (base.country_ds || []).map(ds => sliceDataset(ds, s, e)),
+    proj_raw: sliceSeriesMap(base.proj_raw, s, e),
+    country_raw: sliceSeriesMap(base.country_raw, s, e),
+    camp_ds: {{}},
+  }};
+  fd.proj_summary = summarizeSeriesMap(fd.proj_raw);
+  fd.country_summary = summarizeSeriesMap(fd.country_raw);
+  fd.group_summary = {{...fd.proj_summary, ...fd.country_summary}};
+  Object.entries(base.camp_ds || {{}}).forEach(([g, arr]) => {{
+    fd.camp_ds[g] = (arr || []).map(ds => sliceDataset(ds, s, e));
+  }});
+  const p = base.platform || {{}};
+  const spend = sliceArr(p.spend, s, e);
+  const gmv = sliceArr(p.gmv, s, e);
+  const roi = sliceArr(p.roi, s, e);
+  const totalSpend = sumVals(spend);
+  const totalGmv = sumVals(gmv);
+  fd.platform = {{
+    ...p,
+    spend, gmv, roi,
+    ds: (p.ds || []).map(ds => sliceDataset(ds, s, e)),
+    summary: {{
+      spend: Math.round(totalSpend),
+      gmv: Math.round(totalGmv),
+      roi: totalSpend > 0 && totalGmv > 0 ? Number((totalGmv / totalSpend).toFixed(2)) : null,
+    }},
+  }};
+  return fd;
+}}
+
+function sliceDacEntity(entity, s, e, labelCount) {{
+  const spendSeries = sliceArr(entity.spend_series, s, e);
+  const dacSeries = sliceArr(entity.dac_series, s, e);
+  const costSeries = sliceArr(entity.cost_series, s, e);
+  const gmvSeries = sliceArr(entity.gmv_series, s, e);
+  const roiSeries = sliceArr(entity.roi_series, s, e);
+  const cost = sumVals(spendSeries);
+  const dac = sumVals(dacSeries);
+  const gmv = sumVals(gmvSeries);
+  return {{
+    ...entity,
+    cost: Math.round(cost),
+    dac: Math.round(dac),
+    dac_cost: dac > 0 ? Number((cost / dac).toFixed(2)) : null,
+    gmv: Math.round(gmv),
+    roi: cost > 0 && gmv > 0 ? Number((gmv / cost).toFixed(2)) : null,
+    daily_spend: labelCount > 0 ? Math.round(cost / labelCount) : 0,
+    spend_series: spendSeries,
+    dac_series: dacSeries,
+    cost_series: costSeries,
+    gmv_series: gmvSeries,
+    roi_series: roiSeries,
+  }};
+}}
+
+function getFilteredDacData() {{
+  const base = DAC_DATA["all"] || DAC_DATA[String(dacPeriod)] || {{}};
+  const dates = base.dates || [];
+  const [s, e] = getSliceRange(dates);
+  if (e < s) return {{labels: [], country_summary: {{}}, country_daily: {{}}, camp_daily: {{}}, dac_special: {{}}}};
+  const labels = sliceArr(base.labels, s, e);
+  const country_summary = {{}};
+  const country_daily = {{}};
+  Object.entries(base.country_metrics || {{}}).forEach(([c, m]) => {{
+    const spend = sliceArr(m.spend_series, s, e);
+    const dac = sliceArr(m.dac_series, s, e);
+    const cost = sliceArr(m.cost_series, s, e);
+    const tc = sumVals(spend);
+    const td = sumVals(dac);
+    if (td > 0) {{
+      country_summary[c] = {{
+        cost: Math.round(tc),
+        dac: Math.round(td),
+        dac_cost: Number((tc / td).toFixed(2)),
+        daily_spend: labels.length ? Math.round(tc / labels.length) : 0,
+      }};
+      country_daily[c] = cost;
+    }}
+  }});
+  const camp_daily = {{}};
+  Object.entries(base.camp_daily || {{}}).forEach(([c, camps]) => {{
+    const out = {{}};
+    Object.entries(camps || {{}}).forEach(([camp, vals]) => {{
+      out[camp] = sliceArr(vals, s, e);
+    }});
+    if (Object.keys(out).length) camp_daily[c] = out;
+  }});
+  const sp = base.dac_special || {{}};
+  const dac_special = {{}};
+  if (sp.overall) dac_special.overall = sliceDacEntity(sp.overall, s, e, labels.length);
+  if (sp.campaigns) {{
+    dac_special.campaigns = {{}};
+    Object.entries(sp.campaigns).forEach(([camp, entity]) => {{
+      dac_special.campaigns[camp] = sliceDacEntity(entity, s, e, labels.length);
+    }});
+  }}
+  return {{...base, dates: sliceArr(dates, s, e), labels, country_summary, country_daily, camp_daily, dac_special}};
+}}
+
 // ── Chart factory ────────────────────────────────────────────────────────────
 function makeChart(id, datasets, labels, existing, opts) {{
   if (existing) existing.destroy();
@@ -1130,7 +1496,7 @@ function setSigPeriod(n) {{
 }}
 
 function renderHome() {{
-  const d = ALL[String(period)];
+  const d = getFilteredData();
   const platformSummary = (d.platform || {{}}).summary || {{}};
   const fallbackSpend = Object.values(d.group_summary).reduce((s,x)=>s+(x.spend||0),0);
   const allSpend = platformSummary.spend != null ? platformSummary.spend : fallbackSpend;
@@ -1216,7 +1582,7 @@ function renderSignals() {{
 
 // ── 项目面板 ────────────────────────────────────────────────────────────────
 function renderProject() {{
-  const d = ALL[String(period)];
+  const d = getFilteredData();
   const cards = document.getElementById("proj-cards");
   cards.innerHTML = "";
   const days = d.labels.length;
@@ -1255,7 +1621,7 @@ function renderProject() {{
 
 // ── 国家面板 ────────────────────────────────────────────────────────────────
 function renderCountry() {{
-  const d = ALL[String(period)];
+  const d = getFilteredData();
   const cards = document.getElementById("country-cards");
   cards.innerHTML = "";
   const days = d.labels.length;
@@ -1298,7 +1664,7 @@ function renderCountry() {{
 
 // ── Campaign 面板 ────────────────────────────────────────────────────────────
 function renderCampaign() {{
-  const d=ALL[String(period)];
+  const d=getFilteredData();
   const chips=document.getElementById("group-chips");
   chips.innerHTML="";
   Object.keys(d.proj_summary).sort().forEach(lbl=>chips.appendChild(makeChip(lbl,d.proj_summary[lbl],true)));
@@ -1348,11 +1714,7 @@ function makeChip(lbl,s,isProj) {{
 // ── DAC成本 面板 ─────────────────────────────────────────────────────────────
 function setDacPeriod(n) {{
   dacPeriod = n;
-  [3, 7, 14].forEach(d => {{
-    const btn = document.getElementById('dac-btn-' + d);
-    if (btn) btn.classList.toggle('active', d === n);
-  }});
-  renderDac();
+  setPeriod(n);
 }}
 
 function selectDacCountry(c) {{
@@ -1366,9 +1728,9 @@ function selectDacSpecial(k) {{
 }}
 
 function renderDac() {{
-  if (!DAC_DATA || !DAC_DATA[String(dacPeriod)]) return;
+  if (!DAC_DATA) return;
   renderDacSpecial();
-  const d       = DAC_DATA[String(dacPeriod)];
+  const d       = getFilteredDacData();
   const summary = d.country_summary || {{}};
   const labels  = d.labels || [];
 
@@ -1503,8 +1865,8 @@ function renderDac() {{
 
 // ── DAC 专项板块 ─────────────────────────────────────────────────────────────
 function renderDacSpecial() {{
-  if (!DAC_DATA || !DAC_DATA[String(dacPeriod)]) return;
-  const d  = DAC_DATA[String(dacPeriod)];
+  if (!DAC_DATA) return;
+  const d  = getFilteredDacData();
   const sp = d.dac_special || {{}};
   const labels = d.labels || [];
   const cardsEl = document.getElementById('dac-special-cards');
@@ -1703,12 +2065,6 @@ function selectCountry(c){{selCountry=c;renderCountry();}}
 function selectGroup(g){{selGroup=g;renderCampaign();}}
 function setCampMetric(m){{campMetric=m;renderCampaign();}}
 
-function setPeriod(n){{
-  period=n;
-  document.querySelectorAll(".pbtn").forEach((b,i)=>b.classList.toggle("active",[7,14,30][i]===n));
-  renderAll();
-}}
-
 function switchTab(name){{
   activeTab=name;
   const names=["home","project","country","campaign","dac"];
@@ -1730,7 +2086,10 @@ function renderAll(){{
   renderCampaign();
 }}
 
-// 默认全选：进入即看到所有国家 / Campaign（消耗口径），再按需调整
+// 默认进入过去 14 天；日期控件可扩展到最新 sheet 的最早日期
+setRangeToLast(14);
+setDateInputs();
+updatePeriodButtons();
 renderAll();
 </script>
 </body>
