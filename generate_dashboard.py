@@ -720,14 +720,14 @@ def build_dau_cost_data(records):
         spend_s = [round(ds_map.get(d, {}).get("cost", 0), 2) for d in dates]
         dau_s   = [int(round(ds_map.get(d, {}).get("dau", 0), 0)) for d in dates]
         cost_s  = [
-            round(ds_map[d]["cost"] / ds_map[d]["dau"], 4)
+            round(ds_map[d]["cost"] / ds_map[d]["dau"], 2)
             if ds_map.get(d, {}).get("dau", 0) > 0 else None
             for d in dates
         ]
         country_summary[c] = {
             "cost":        round(total_cost, 0),
             "dau":         int(round(total_dau, 0)),
-            "dau_cost":    round(total_cost / total_dau, 4),
+            "dau_cost":    round(total_cost / total_dau, 2),
             "daily_spend": round(total_cost / max(len(dates), 1), 0),
         }
         country_metrics[c] = {
@@ -742,7 +742,7 @@ def build_dau_cost_data(records):
         camps = {}
         for camp, ds_map in camp_map.items():
             series = [
-                round(ds_map[d]["cost"] / ds_map[d]["dau"], 4)
+                round(ds_map[d]["cost"] / ds_map[d]["dau"], 2)
                 if ds_map.get(d, {}).get("dau", 0) > 0 else None
                 for d in dates
             ]
@@ -1545,9 +1545,7 @@ function sumVals(arr) {{
 
 function fmtDauCost(v) {{
   if (v === null || v === undefined || Number.isNaN(Number(v))) return "-";
-  const n = Number(v);
-  const digits = Math.abs(n) < 1 ? 4 : 2;
-  return "$" + n.toLocaleString(undefined, {{minimumFractionDigits: digits, maximumFractionDigits: digits}});
+  return "$" + Number(v).toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}});
 }}
 
 function sliceDataset(ds, s, e) {{
@@ -1705,7 +1703,7 @@ function getFilteredDauCostData() {{
       country_summary[c] = {{
         cost: Math.round(tc),
         dau: Math.round(td),
-        dau_cost: Number((tc / td).toFixed(4)),
+        dau_cost: Number((tc / td).toFixed(2)),
         daily_spend: labels.length ? Math.round(tc / labels.length) : 0,
       }};
       country_daily[c] = cost;
@@ -2147,7 +2145,16 @@ function renderDauCost() {{
           return v != null ? ctx.dataset.label + ': ' + fmtDauCost(v) : null;
         }} }} }},
         datalabels: {{
-          display: false,
+          display: true,
+          formatter: v => v != null ? fmtDauCost(v) : null,
+          color: ctx => ctx.dataset.borderColor || '#333',
+          font: {{ size: 10, weight: '700' }},
+          anchor: 'end',
+          align: 'top',
+          offset: 2,
+          backgroundColor: 'rgba(255,255,255,0.82)',
+          borderRadius: 3,
+          padding: {{ top: 1, bottom: 1, left: 3, right: 3 }},
         }},
       }},
     }},
