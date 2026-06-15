@@ -1,0 +1,808 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AliExpress Campaign 24H ROI 内部复盘</title>
+  <style>
+    :root {
+      --bg: #f6f7fb;
+      --ink: #172033;
+      --muted: #657084;
+      --line: #dbe1ea;
+      --card: #ffffff;
+      --blue: #2563eb;
+      --orange: #ea580c;
+      --green: #16a34a;
+      --red: #dc2626;
+      --amber: #b7791f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    main { width: min(1180px, calc(100vw - 40px)); margin: 0 auto; padding: 34px 0 54px; }
+    header {
+      padding: 34px 0 20px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 24px;
+    }
+    h1 { margin: 0 0 10px; font-size: 34px; line-height: 1.12; letter-spacing: 0; }
+    h2 { margin: 34px 0 14px; font-size: 22px; line-height: 1.2; letter-spacing: 0; }
+    h3 { margin: 0 0 8px; font-size: 16px; letter-spacing: 0; }
+    p { margin: 0 0 10px; }
+    .sub { color: var(--muted); font-size: 15px; }
+    .grid { display: grid; gap: 14px; }
+    .kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 22px 0 8px; }
+    .kpi, .panel {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
+    }
+    .kpi { padding: 18px; min-height: 104px; }
+    .kpi .label { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+    .kpi .value { font-size: 26px; font-weight: 760; line-height: 1.05; }
+    .kpi .note { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    .panel { padding: 18px; margin: 14px 0; }
+    .summary { grid-template-columns: 1.2fr 1fr; }
+    .callout {
+      border-left: 4px solid var(--blue);
+      padding: 14px 16px;
+      background: #eef5ff;
+      border-radius: 6px;
+    }
+    .callout.warn { border-left-color: var(--amber); background: #fff7e6; }
+    .bullets { margin: 8px 0 0; padding-left: 18px; }
+    .bullets li { margin: 6px 0; }
+    .chart { width: 100%; height: auto; display: block; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+    .svg-title { font: 700 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #172033; }
+    .svg-label { font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #263447; }
+    .svg-value, .svg-note { font: 700 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #263447; }
+    .svg-axis, .svg-tick { font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #657084; }
+    .muted { fill: #8791a2; }
+    .table-wrap { overflow-x: auto; background: #fff; border: 1px solid var(--line); border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; min-width: 860px; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid #edf0f5; text-align: left; vertical-align: top; }
+    th { font-size: 12px; color: #526074; background: #f9fafc; white-space: nowrap; }
+    td { font-size: 13px; }
+    tr:last-child td { border-bottom: 0; }
+    tr.good td:first-child, tr.strong td:first-child { border-left: 4px solid var(--green); }
+    tr.bad td:first-child, tr.weak td:first-child { border-left: 4px solid var(--red); }
+    tr.neutral td:first-child { border-left: 4px solid #94a3b8; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      background: #eef2ff;
+      color: #3343a7;
+      white-space: nowrap;
+    }
+    .foot {
+      color: var(--muted);
+      font-size: 12px;
+      border-top: 1px solid var(--line);
+      margin-top: 34px;
+      padding-top: 16px;
+    }
+    @media (max-width: 860px) {
+      main { width: min(100vw - 24px, 1180px); padding-top: 18px; }
+      h1 { font-size: 26px; }
+      .kpis, .summary { grid-template-columns: 1fr; }
+      .kpi { min-height: auto; }
+    }
+    </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>AliExpress Campaign 24H ROI 内部复盘</h1>
+    <p class="sub">仅覆盖你列举的 campaign · 数据截至 2026-06-13 · 近 14 天窗口 2026-05-31 ~ 2026-06-13</p>
+    <div class="grid kpis">
+      <div class="kpi"><div class="label">分析 Campaign 数</div><div class="value">17 个</div><div class="note">当前有效清单</div></div>
+      <div class="kpi"><div class="label">近14天组合 24H ROI</div><div class="value">4.66x</div><div class="note">按 campaign 当日权重加权</div></div>
+      <div class="kpi"><div class="label">强于所在国家 ROI</div><div class="value">10 个</div><div class="note">近14天加权 ROI 对比</div></div>
+      <div class="kpi"><div class="label">最新日最高 ROI</div><div class="value">7.68x</div><div class="note">F4Uf3q8nCIrXk9pe</div></div>
+    </div>
+  </header>
+
+  <section class="grid summary">
+    <div class="panel">
+      <h3>内部分享主结论</h3>
+      <ul class="bullets">
+        <li>近14天列举 campaign 组合 24H ROI 为 4.66x，最新日为 5.14x。</li>
+        <li>相对所在国家整体 ROI 表现最强的是 ES F4Uf3q8nCIrXk9pe、US v7QnRXIVonS5uomZ、JP uZYdUYjX7BfsIDxD、ES KynO7ddluR5Ued5R。</li>
+        <li>弱于所在国家整体 ROI 的主要是 DE WGR7ynKlrWf9GQ0F、FR UwfFBJhBjyhbTpx2、NL tvXgqWrgtHKyOBlL、US KQzASDugGlYNVUcL，这几条更适合先观察或压低优先级。</li>
+        <li>6/5 标注替换的 7 个 campaign 替换后 24H ROI 全部提升；其中 aAYWAdtK8yzGtcMp、aG917NDz5gBw6VRf、tD7ZrHZpoCqTQwKE、v7QnRXIVonS5uomZ 的 ROI 增幅最明显。</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>口径说明</h3>
+      <p>Campaign ROI 使用数据表里的 campaign 24H ROI，并按该 campaign 当日权重加权。</p>
+      <p>国家/项目整体 ROI 使用同 label 的 Σ24h_gmv / Σcost，用于判断 campaign 是否强于所在国家整体表现。</p>
+      <p>6/5替换对比窗口：替换前 2026-05-31~2026-06-04，替换后 2026-06-05~2026-06-13；这里只看 24H ROI 变化。</p>
+    </div>
+  </section>
+
+  <h2>1. 列举 Campaign 组合 ROI 趋势</h2>
+  <div class="panel"><svg class="chart" viewBox="0 0 1060 360" role="img" aria-label="列举 Campaign 组合 24H ROI 趋势">
+<rect x="0" y="0" width="1060" height="360" rx="16" fill="#ffffff"/>
+<text x="64" y="24" class="svg-title">列举 Campaign 组合 24H ROI 趋势</text>
+<text x="64" y="344" class="svg-axis">日期</text>
+<text x="64" y="54" class="svg-axis">24H ROI</text>
+<line x1="64" y1="302.0" x2="1000" y2="302.0" stroke="#e5eaf2"/>
+<text x="54" y="306.0" class="svg-tick" text-anchor="end">0.7x</text>
+<line x1="64" y1="237.0" x2="1000" y2="237.0" stroke="#e5eaf2"/>
+<text x="54" y="241.0" class="svg-tick" text-anchor="end">4.9x</text>
+<line x1="64" y1="172.0" x2="1000" y2="172.0" stroke="#e5eaf2"/>
+<text x="54" y="176.0" class="svg-tick" text-anchor="end">9.1x</text>
+<line x1="64" y1="107.0" x2="1000" y2="107.0" stroke="#e5eaf2"/>
+<text x="54" y="111.0" class="svg-tick" text-anchor="end">13.2x</text>
+<line x1="64" y1="42.0" x2="1000" y2="42.0" stroke="#e5eaf2"/>
+<text x="54" y="46.0" class="svg-tick" text-anchor="end">17.4x</text>
+<text x="64.0" y="326" class="svg-tick" text-anchor="middle">5/31</text>
+<text x="208.0" y="326" class="svg-tick" text-anchor="middle">6/2</text>
+<text x="352.0" y="326" class="svg-tick" text-anchor="middle">6/4</text>
+<text x="496.0" y="326" class="svg-tick" text-anchor="middle">6/6</text>
+<text x="640.0" y="326" class="svg-tick" text-anchor="middle">6/8</text>
+<text x="784.0" y="326" class="svg-tick" text-anchor="middle">6/10</text>
+<text x="928.0" y="326" class="svg-tick" text-anchor="middle">6/12</text>
+<polyline points="136.0,276.8 208.0,260.6 280.0,238.5 352.0,233.6 424.0,251.8 496.0,232.5 568.0,247.1 640.0,67.2 712.0,95.6 784.0,119.2 856.0,232.9 928.0,233.3 1000.0,233.3" fill="none" stroke="#ea580c" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+<circle cx="136.0" cy="276.8" r="4.5" fill="#ea580c"/>
+<circle cx="208.0" cy="260.6" r="4.5" fill="#ea580c"/>
+<circle cx="280.0" cy="238.5" r="4.5" fill="#ea580c"/>
+<circle cx="352.0" cy="233.6" r="4.5" fill="#ea580c"/>
+<circle cx="424.0" cy="251.8" r="4.5" fill="#ea580c"/>
+<circle cx="496.0" cy="232.5" r="4.5" fill="#ea580c"/>
+<circle cx="568.0" cy="247.1" r="4.5" fill="#ea580c"/>
+<circle cx="640.0" cy="67.2" r="4.5" fill="#ea580c"/>
+<circle cx="712.0" cy="95.6" r="4.5" fill="#ea580c"/>
+<circle cx="784.0" cy="119.2" r="4.5" fill="#ea580c"/>
+<circle cx="856.0" cy="232.9" r="4.5" fill="#ea580c"/>
+<circle cx="928.0" cy="233.3" r="4.5" fill="#ea580c"/>
+<circle cx="1000.0" cy="233.3" r="4.5" fill="#ea580c"/>
+<text x="856.0" y="222.9" class="svg-note" text-anchor="middle">5.17x</text>
+<text x="928.0" y="223.3" class="svg-note" text-anchor="middle">5.14x</text>
+<text x="1000.0" y="223.3" class="svg-note" text-anchor="middle">5.14x</text>
+<line x1="838" y1="23" x2="858" y2="23" stroke="#ea580c" stroke-width="3.5"/><text x="866" y="27" class="svg-axis">列举campaign加权ROI</text>
+</svg></div>
+
+  <h2>2. 逐 Campaign 每日 24H ROI</h2>
+  <div class="panel"><svg class="chart" viewBox="0 0 1160 576" role="img" aria-label="Campaign每日24H ROI热力图">
+<rect x="0" y="0" width="1160" height="576" rx="16" fill="#ffffff"/>
+<text x="24" y="30" class="svg-title">近14天逐 Campaign 24H ROI 热力图</text>
+<text x="24" y="52" class="svg-axis">颜色越深代表 ROI 越高；灰色为当日无有效 ROI</text>
+<text x="279.0" y="52" class="svg-tick" text-anchor="middle">5/31</text>
+<text x="337.0" y="52" class="svg-tick" text-anchor="middle">6/1</text>
+<text x="395.0" y="52" class="svg-tick" text-anchor="middle">6/2</text>
+<text x="453.0" y="52" class="svg-tick" text-anchor="middle">6/3</text>
+<text x="511.0" y="52" class="svg-tick" text-anchor="middle">6/4</text>
+<text x="569.0" y="52" class="svg-tick" text-anchor="middle">6/5</text>
+<text x="627.0" y="52" class="svg-tick" text-anchor="middle">6/6</text>
+<text x="685.0" y="52" class="svg-tick" text-anchor="middle">6/7</text>
+<text x="743.0" y="52" class="svg-tick" text-anchor="middle">6/8</text>
+<text x="801.0" y="52" class="svg-tick" text-anchor="middle">6/9</text>
+<text x="859.0" y="52" class="svg-tick" text-anchor="middle">6/10</text>
+<text x="917.0" y="52" class="svg-tick" text-anchor="middle">6/11</text>
+<text x="975.0" y="52" class="svg-tick" text-anchor="middle">6/12</text>
+<text x="1033.0" y="52" class="svg-tick" text-anchor="middle">6/13</text>
+<text x="24" y="81" class="svg-label">ES · F4Uf3q</text>
+<rect x="250.0" y="64" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="277.0" y="80" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="308.0" y="64" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="335.0" y="80" class="svg-note" text-anchor="middle" style="fill:#ffffff">9.3</text>
+<rect x="366.0" y="64" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="393.0" y="80" class="svg-note" text-anchor="middle" style="fill:#166534">4.7</text>
+<rect x="424.0" y="64" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="451.0" y="80" class="svg-note" text-anchor="middle" style="fill:#ffffff">6.2</text>
+<rect x="482.0" y="64" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="509.0" y="80" class="svg-note" text-anchor="middle" style="fill:#ffffff">7.7</text>
+<rect x="540.0" y="64" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="567.0" y="80" class="svg-note" text-anchor="middle" style="fill:#ffffff">7.2</text>
+<rect x="598.0" y="64" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="625.0" y="80" class="svg-note" text-anchor="middle" style="fill:#ffffff">20.2</text>
+<rect x="656.0" y="64" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="683.0" y="80" class="svg-note" text-anchor="middle" style="fill:#ffffff">10.0</text>
+<rect x="714.0" y="64" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="741.0" y="80" class="svg-note" text-anchor="middle" style="fill:#ffffff">60.3</text>
+<rect x="772.0" y="64" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="799.0" y="80" class="svg-note" text-anchor="middle" style="fill:#ffffff">53.3</text>
+<rect x="830.0" y="64" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="857.0" y="80" class="svg-note" text-anchor="middle" style="fill:#ffffff">36.4</text>
+<rect x="888.0" y="64" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="915.0" y="80" class="svg-note" text-anchor="middle" style="fill:#ffffff">6.7</text>
+<rect x="946.0" y="64" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="973.0" y="80" class="svg-note" text-anchor="middle" style="fill:#ffffff">10.9</text>
+<rect x="1004.0" y="64" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="1031.0" y="80" class="svg-note" text-anchor="middle" style="fill:#ffffff">7.7</text>
+<text x="24" y="109" class="svg-label">US · v7QnRX</text>
+<rect x="250.0" y="92" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="277.0" y="108" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="308.0" y="92" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="335.0" y="108" class="svg-note" text-anchor="middle" style="fill:#166534">4.1</text>
+<rect x="366.0" y="92" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="393.0" y="108" class="svg-note" text-anchor="middle" style="fill:#ffffff">6.8</text>
+<rect x="424.0" y="92" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="451.0" y="108" class="svg-note" text-anchor="middle" style="fill:#166534">5.8</text>
+<rect x="482.0" y="92" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="509.0" y="108" class="svg-note" text-anchor="middle" style="fill:#166534">4.2</text>
+<rect x="540.0" y="92" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="567.0" y="108" class="svg-note" text-anchor="middle" style="fill:#991b1b">1.9</text>
+<rect x="598.0" y="92" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="625.0" y="108" class="svg-note" text-anchor="middle" style="fill:#166534">4.2</text>
+<rect x="656.0" y="92" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="683.0" y="108" class="svg-note" text-anchor="middle" style="fill:#166534">4.5</text>
+<rect x="714.0" y="92" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="741.0" y="108" class="svg-note" text-anchor="middle" style="fill:#ffffff">15.9</text>
+<rect x="772.0" y="92" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="799.0" y="108" class="svg-note" text-anchor="middle" style="fill:#ffffff">26.7</text>
+<rect x="830.0" y="92" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="857.0" y="108" class="svg-note" text-anchor="middle" style="fill:#ffffff">21.6</text>
+<rect x="888.0" y="92" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="915.0" y="108" class="svg-note" text-anchor="middle" style="fill:#ffffff">7.7</text>
+<rect x="946.0" y="92" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="973.0" y="108" class="svg-note" text-anchor="middle" style="fill:#ffffff">9.6</text>
+<rect x="1004.0" y="92" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="1031.0" y="108" class="svg-note" text-anchor="middle" style="fill:#ffffff">7.6</text>
+<text x="24" y="137" class="svg-label">ES · KynO7d</text>
+<rect x="250.0" y="120" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="277.0" y="136" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="308.0" y="120" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="335.0" y="136" class="svg-note" text-anchor="middle" style="fill:#166534">5.1</text>
+<rect x="366.0" y="120" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="393.0" y="136" class="svg-note" text-anchor="middle" style="fill:#ffffff">24.7</text>
+<rect x="424.0" y="120" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="451.0" y="136" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="482.0" y="120" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="509.0" y="136" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="540.0" y="120" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="567.0" y="136" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="598.0" y="120" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="625.0" y="136" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="656.0" y="120" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="683.0" y="136" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="714.0" y="120" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="741.0" y="136" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="772.0" y="120" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="799.0" y="136" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="830.0" y="120" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="857.0" y="136" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="888.0" y="120" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="915.0" y="136" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="946.0" y="120" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="973.0" y="136" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="1004.0" y="120" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="1031.0" y="136" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<text x="24" y="165" class="svg-label">JP · uZYdUY</text>
+<rect x="250.0" y="148" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="277.0" y="164" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="308.0" y="148" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="335.0" y="164" class="svg-note" text-anchor="middle" style="fill:#166534">5.2</text>
+<rect x="366.0" y="148" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="393.0" y="164" class="svg-note" text-anchor="middle" style="fill:#ffffff">7.4</text>
+<rect x="424.0" y="148" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="451.0" y="164" class="svg-note" text-anchor="middle" style="fill:#166534">5.1</text>
+<rect x="482.0" y="148" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="509.0" y="164" class="svg-note" text-anchor="middle" style="fill:#ffffff">24.9</text>
+<rect x="540.0" y="148" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="567.0" y="164" class="svg-note" text-anchor="middle" style="fill:#166534">4.2</text>
+<rect x="598.0" y="148" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="625.0" y="164" class="svg-note" text-anchor="middle" style="fill:#92400e">3.6</text>
+<rect x="656.0" y="148" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="683.0" y="164" class="svg-note" text-anchor="middle" style="fill:#92400e">2.4</text>
+<rect x="714.0" y="148" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="741.0" y="164" class="svg-note" text-anchor="middle" style="fill:#ffffff">6.2</text>
+<rect x="772.0" y="148" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="799.0" y="164" class="svg-note" text-anchor="middle" style="fill:#ffffff">6.2</text>
+<rect x="830.0" y="148" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="857.0" y="164" class="svg-note" text-anchor="middle" style="fill:#166534">4.2</text>
+<rect x="888.0" y="148" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="915.0" y="164" class="svg-note" text-anchor="middle" style="fill:#166534">4.3</text>
+<rect x="946.0" y="148" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="973.0" y="164" class="svg-note" text-anchor="middle" style="fill:#92400e">3.2</text>
+<rect x="1004.0" y="148" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="1031.0" y="164" class="svg-note" text-anchor="middle" style="fill:#92400e">2.5</text>
+<text x="24" y="193" class="svg-label">IL · NSzoa2</text>
+<rect x="250.0" y="176" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="277.0" y="192" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="308.0" y="176" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="335.0" y="192" class="svg-note" text-anchor="middle" style="fill:#ffffff">6.9</text>
+<rect x="366.0" y="176" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="393.0" y="192" class="svg-note" text-anchor="middle" style="fill:#166534">5.2</text>
+<rect x="424.0" y="176" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="451.0" y="192" class="svg-note" text-anchor="middle" style="fill:#ffffff">9.0</text>
+<rect x="482.0" y="176" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="509.0" y="192" class="svg-note" text-anchor="middle" style="fill:#ffffff">8.4</text>
+<rect x="540.0" y="176" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="567.0" y="192" class="svg-note" text-anchor="middle" style="fill:#ffffff">6.8</text>
+<rect x="598.0" y="176" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="625.0" y="192" class="svg-note" text-anchor="middle" style="fill:#92400e">3.3</text>
+<rect x="656.0" y="176" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="683.0" y="192" class="svg-note" text-anchor="middle" style="fill:#991b1b">0.8</text>
+<rect x="714.0" y="176" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="741.0" y="192" class="svg-note" text-anchor="middle" style="fill:#92400e">2.4</text>
+<rect x="772.0" y="176" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="799.0" y="192" class="svg-note" text-anchor="middle" style="fill:#166534">4.4</text>
+<rect x="830.0" y="176" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="857.0" y="192" class="svg-note" text-anchor="middle" style="fill:#166534">4.5</text>
+<rect x="888.0" y="176" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="915.0" y="192" class="svg-note" text-anchor="middle" style="fill:#166534">4.1</text>
+<rect x="946.0" y="176" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="973.0" y="192" class="svg-note" text-anchor="middle" style="fill:#ffffff">21.8</text>
+<rect x="1004.0" y="176" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="1031.0" y="192" class="svg-note" text-anchor="middle" style="fill:#92400e">2.3</text>
+<text x="24" y="221" class="svg-label">PL · VnntC5</text>
+<rect x="250.0" y="204" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="277.0" y="220" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="308.0" y="204" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="335.0" y="220" class="svg-note" text-anchor="middle" style="fill:#991b1b">1.8</text>
+<rect x="366.0" y="204" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="393.0" y="220" class="svg-note" text-anchor="middle" style="fill:#92400e">3.8</text>
+<rect x="424.0" y="204" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="451.0" y="220" class="svg-note" text-anchor="middle" style="fill:#166534">4.4</text>
+<rect x="482.0" y="204" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="509.0" y="220" class="svg-note" text-anchor="middle" style="fill:#ffffff">7.4</text>
+<rect x="540.0" y="204" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="567.0" y="220" class="svg-note" text-anchor="middle" style="fill:#166534">5.0</text>
+<rect x="598.0" y="204" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="625.0" y="220" class="svg-note" text-anchor="middle" style="fill:#92400e">3.7</text>
+<rect x="656.0" y="204" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="683.0" y="220" class="svg-note" text-anchor="middle" style="fill:#166534">4.5</text>
+<rect x="714.0" y="204" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="741.0" y="220" class="svg-note" text-anchor="middle" style="fill:#ffffff">6.3</text>
+<rect x="772.0" y="204" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="799.0" y="220" class="svg-note" text-anchor="middle" style="fill:#166534">5.2</text>
+<rect x="830.0" y="204" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="857.0" y="220" class="svg-note" text-anchor="middle" style="fill:#166534">5.6</text>
+<rect x="888.0" y="204" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="915.0" y="220" class="svg-note" text-anchor="middle" style="fill:#ffffff">6.0</text>
+<rect x="946.0" y="204" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="973.0" y="220" class="svg-note" text-anchor="middle" style="fill:#92400e">2.1</text>
+<rect x="1004.0" y="204" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="1031.0" y="220" class="svg-note" text-anchor="middle" style="fill:#166534">5.8</text>
+<text x="24" y="249" class="svg-label">IT · aPLehU</text>
+<rect x="250.0" y="232" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="277.0" y="248" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="308.0" y="232" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="335.0" y="248" class="svg-note" text-anchor="middle" style="fill:#92400e">3.1</text>
+<rect x="366.0" y="232" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="393.0" y="248" class="svg-note" text-anchor="middle" style="fill:#ffffff">7.0</text>
+<rect x="424.0" y="232" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="451.0" y="248" class="svg-note" text-anchor="middle" style="fill:#92400e">3.7</text>
+<rect x="482.0" y="232" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="509.0" y="248" class="svg-note" text-anchor="middle" style="fill:#92400e">3.8</text>
+<rect x="540.0" y="232" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="567.0" y="248" class="svg-note" text-anchor="middle" style="fill:#ffffff">7.4</text>
+<rect x="598.0" y="232" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="625.0" y="248" class="svg-note" text-anchor="middle" style="fill:#92400e">3.2</text>
+<rect x="656.0" y="232" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="683.0" y="248" class="svg-note" text-anchor="middle" style="fill:#991b1b">1.8</text>
+<rect x="714.0" y="232" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="741.0" y="248" class="svg-note" text-anchor="middle" style="fill:#ffffff">12.8</text>
+<rect x="772.0" y="232" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="799.0" y="248" class="svg-note" text-anchor="middle" style="fill:#92400e">3.2</text>
+<rect x="830.0" y="232" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="857.0" y="248" class="svg-note" text-anchor="middle" style="fill:#ffffff">12.5</text>
+<rect x="888.0" y="232" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="915.0" y="248" class="svg-note" text-anchor="middle" style="fill:#92400e">2.6</text>
+<rect x="946.0" y="232" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="973.0" y="248" class="svg-note" text-anchor="middle" style="fill:#92400e">2.2</text>
+<rect x="1004.0" y="232" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="1031.0" y="248" class="svg-note" text-anchor="middle" style="fill:#92400e">2.6</text>
+<text x="24" y="277" class="svg-label">GB · aAYWAd</text>
+<rect x="250.0" y="260" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="277.0" y="276" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="308.0" y="260" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="335.0" y="276" class="svg-note" text-anchor="middle" style="fill:#991b1b">1.8</text>
+<rect x="366.0" y="260" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="393.0" y="276" class="svg-note" text-anchor="middle" style="fill:#991b1b">2.0</text>
+<rect x="424.0" y="260" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="451.0" y="276" class="svg-note" text-anchor="middle" style="fill:#166534">5.7</text>
+<rect x="482.0" y="260" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="509.0" y="276" class="svg-note" text-anchor="middle" style="fill:#ffffff">6.3</text>
+<rect x="540.0" y="260" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="567.0" y="276" class="svg-note" text-anchor="middle" style="fill:#ffffff">11.3</text>
+<rect x="598.0" y="260" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="625.0" y="276" class="svg-note" text-anchor="middle" style="fill:#166534">5.1</text>
+<rect x="656.0" y="260" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="683.0" y="276" class="svg-note" text-anchor="middle" style="fill:#166534">4.6</text>
+<rect x="714.0" y="260" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="741.0" y="276" class="svg-note" text-anchor="middle" style="fill:#ffffff">30.9</text>
+<rect x="772.0" y="260" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="799.0" y="276" class="svg-note" text-anchor="middle" style="fill:#ffffff">15.2</text>
+<rect x="830.0" y="260" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="857.0" y="276" class="svg-note" text-anchor="middle" style="fill:#ffffff">12.4</text>
+<rect x="888.0" y="260" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="915.0" y="276" class="svg-note" text-anchor="middle" style="fill:#92400e">3.7</text>
+<rect x="946.0" y="260" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="973.0" y="276" class="svg-note" text-anchor="middle" style="fill:#92400e">3.5</text>
+<rect x="1004.0" y="260" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="1031.0" y="276" class="svg-note" text-anchor="middle" style="fill:#92400e">3.3</text>
+<text x="24" y="305" class="svg-label">US · KQzASD</text>
+<rect x="250.0" y="288" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="277.0" y="304" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="308.0" y="288" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="335.0" y="304" class="svg-note" text-anchor="middle" style="fill:#166534">4.1</text>
+<rect x="366.0" y="288" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="393.0" y="304" class="svg-note" text-anchor="middle" style="fill:#991b1b">1.9</text>
+<rect x="424.0" y="288" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="451.0" y="304" class="svg-note" text-anchor="middle" style="fill:#ffffff">8.1</text>
+<rect x="482.0" y="288" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="509.0" y="304" class="svg-note" text-anchor="middle" style="fill:#ffffff">12.4</text>
+<rect x="540.0" y="288" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="567.0" y="304" class="svg-note" text-anchor="middle" style="fill:#ffffff">12.0</text>
+<rect x="598.0" y="288" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="625.0" y="304" class="svg-note" text-anchor="middle" style="fill:#ffffff">8.2</text>
+<rect x="656.0" y="288" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="683.0" y="304" class="svg-note" text-anchor="middle" style="fill:#92400e">3.2</text>
+<rect x="714.0" y="288" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="741.0" y="304" class="svg-note" text-anchor="middle" style="fill:#991b1b">0.8</text>
+<rect x="772.0" y="288" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="799.0" y="304" class="svg-note" text-anchor="middle" style="fill:#991b1b">0.8</text>
+<rect x="830.0" y="288" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="857.0" y="304" class="svg-note" text-anchor="middle" style="fill:#991b1b">1.4</text>
+<rect x="888.0" y="288" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="915.0" y="304" class="svg-note" text-anchor="middle" style="fill:#92400e">2.4</text>
+<rect x="946.0" y="288" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="973.0" y="304" class="svg-note" text-anchor="middle" style="fill:#92400e">3.1</text>
+<rect x="1004.0" y="288" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="1031.0" y="304" class="svg-note" text-anchor="middle" style="fill:#92400e">3.6</text>
+<text x="24" y="333" class="svg-label">BR · C8w6QM</text>
+<rect x="250.0" y="316" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="277.0" y="332" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="308.0" y="316" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="335.0" y="332" class="svg-note" text-anchor="middle" style="fill:#92400e">2.9</text>
+<rect x="366.0" y="316" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="393.0" y="332" class="svg-note" text-anchor="middle" style="fill:#166534">4.1</text>
+<rect x="424.0" y="316" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="451.0" y="332" class="svg-note" text-anchor="middle" style="fill:#166534">5.3</text>
+<rect x="482.0" y="316" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="509.0" y="332" class="svg-note" text-anchor="middle" style="fill:#166534">5.4</text>
+<rect x="540.0" y="316" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="567.0" y="332" class="svg-note" text-anchor="middle" style="fill:#92400e">3.5</text>
+<rect x="598.0" y="316" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="625.0" y="332" class="svg-note" text-anchor="middle" style="fill:#166534">5.0</text>
+<rect x="656.0" y="316" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="683.0" y="332" class="svg-note" text-anchor="middle" style="fill:#92400e">3.4</text>
+<rect x="714.0" y="316" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="741.0" y="332" class="svg-note" text-anchor="middle" style="fill:#166534">5.0</text>
+<rect x="772.0" y="316" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="799.0" y="332" class="svg-note" text-anchor="middle" style="fill:#166534">4.9</text>
+<rect x="830.0" y="316" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="857.0" y="332" class="svg-note" text-anchor="middle" style="fill:#92400e">3.4</text>
+<rect x="888.0" y="316" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="915.0" y="332" class="svg-note" text-anchor="middle" style="fill:#166534">5.1</text>
+<rect x="946.0" y="316" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="973.0" y="332" class="svg-note" text-anchor="middle" style="fill:#92400e">2.4</text>
+<rect x="1004.0" y="316" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="1031.0" y="332" class="svg-note" text-anchor="middle" style="fill:#92400e">3.6</text>
+<text x="24" y="361" class="svg-label">CL · aG917N</text>
+<rect x="250.0" y="344" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="277.0" y="360" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="308.0" y="344" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="335.0" y="360" class="svg-note" text-anchor="middle" style="fill:#991b1b">1.5</text>
+<rect x="366.0" y="344" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="393.0" y="360" class="svg-note" text-anchor="middle" style="fill:#166534">4.2</text>
+<rect x="424.0" y="344" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="451.0" y="360" class="svg-note" text-anchor="middle" style="fill:#166534">5.3</text>
+<rect x="482.0" y="344" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="509.0" y="360" class="svg-note" text-anchor="middle" style="fill:#991b1b">1.8</text>
+<rect x="540.0" y="344" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="567.0" y="360" class="svg-note" text-anchor="middle" style="fill:#92400e">2.9</text>
+<rect x="598.0" y="344" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="625.0" y="360" class="svg-note" text-anchor="middle" style="fill:#ffffff">9.4</text>
+<rect x="656.0" y="344" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="683.0" y="360" class="svg-note" text-anchor="middle" style="fill:#166534">5.3</text>
+<rect x="714.0" y="344" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="741.0" y="360" class="svg-note" text-anchor="middle" style="fill:#ffffff">7.1</text>
+<rect x="772.0" y="344" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="799.0" y="360" class="svg-note" text-anchor="middle" style="fill:#166534">5.3</text>
+<rect x="830.0" y="344" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="857.0" y="360" class="svg-note" text-anchor="middle" style="fill:#ffffff">12.1</text>
+<rect x="888.0" y="344" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="915.0" y="360" class="svg-note" text-anchor="middle" style="fill:#166534">5.2</text>
+<rect x="946.0" y="344" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="973.0" y="360" class="svg-note" text-anchor="middle" style="fill:#991b1b">0.3</text>
+<rect x="1004.0" y="344" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="1031.0" y="360" class="svg-note" text-anchor="middle" style="fill:#166534">4.3</text>
+<text x="24" y="389" class="svg-label">NL · tvXgqW</text>
+<rect x="250.0" y="372" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="277.0" y="388" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="308.0" y="372" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="335.0" y="388" class="svg-note" text-anchor="middle" style="fill:#92400e">2.9</text>
+<rect x="366.0" y="372" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="393.0" y="388" class="svg-note" text-anchor="middle" style="fill:#92400e">2.9</text>
+<rect x="424.0" y="372" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="451.0" y="388" class="svg-note" text-anchor="middle" style="fill:#ffffff">8.3</text>
+<rect x="482.0" y="372" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="509.0" y="388" class="svg-note" text-anchor="middle" style="fill:#92400e">3.6</text>
+<rect x="540.0" y="372" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="567.0" y="388" class="svg-note" text-anchor="middle" style="fill:#92400e">3.5</text>
+<rect x="598.0" y="372" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="625.0" y="388" class="svg-note" text-anchor="middle" style="fill:#ffffff">8.6</text>
+<rect x="656.0" y="372" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="683.0" y="388" class="svg-note" text-anchor="middle" style="fill:#991b1b">0.5</text>
+<rect x="714.0" y="372" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="741.0" y="388" class="svg-note" text-anchor="middle" style="fill:#991b1b">0.7</text>
+<rect x="772.0" y="372" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="799.0" y="388" class="svg-note" text-anchor="middle" style="fill:#991b1b">0.5</text>
+<rect x="830.0" y="372" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="857.0" y="388" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="888.0" y="372" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="915.0" y="388" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="946.0" y="372" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="973.0" y="388" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="1004.0" y="372" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="1031.0" y="388" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<text x="24" y="417" class="svg-label">FR · tD7ZrH</text>
+<rect x="250.0" y="400" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="277.0" y="416" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="308.0" y="400" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="335.0" y="416" class="svg-note" text-anchor="middle" style="fill:#991b1b">1.4</text>
+<rect x="366.0" y="400" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="393.0" y="416" class="svg-note" text-anchor="middle" style="fill:#92400e">3.3</text>
+<rect x="424.0" y="400" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="451.0" y="416" class="svg-note" text-anchor="middle" style="fill:#ffffff">9.7</text>
+<rect x="482.0" y="400" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="509.0" y="416" class="svg-note" text-anchor="middle" style="fill:#ffffff">11.2</text>
+<rect x="540.0" y="400" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="567.0" y="416" class="svg-note" text-anchor="middle" style="fill:#92400e">2.1</text>
+<rect x="598.0" y="400" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="625.0" y="416" class="svg-note" text-anchor="middle" style="fill:#166534">4.7</text>
+<rect x="656.0" y="400" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="683.0" y="416" class="svg-note" text-anchor="middle" style="fill:#ffffff">9.3</text>
+<rect x="714.0" y="400" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="741.0" y="416" class="svg-note" text-anchor="middle" style="fill:#ffffff">7.8</text>
+<rect x="772.0" y="400" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="799.0" y="416" class="svg-note" text-anchor="middle" style="fill:#ffffff">8.2</text>
+<rect x="830.0" y="400" width="54" height="24" rx="5" fill="#14532d"/>
+<text x="857.0" y="416" class="svg-note" text-anchor="middle" style="fill:#ffffff">8.0</text>
+<rect x="888.0" y="400" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="915.0" y="416" class="svg-note" text-anchor="middle" style="fill:#166534">5.1</text>
+<rect x="946.0" y="400" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="973.0" y="416" class="svg-note" text-anchor="middle" style="fill:#991b1b">1.0</text>
+<rect x="1004.0" y="400" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="1031.0" y="416" class="svg-note" text-anchor="middle" style="fill:#166534">4.4</text>
+<text x="24" y="445" class="svg-label">BR · rtHodE</text>
+<rect x="250.0" y="428" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="277.0" y="444" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="308.0" y="428" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="335.0" y="444" class="svg-note" text-anchor="middle" style="fill:#92400e">2.3</text>
+<rect x="366.0" y="428" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="393.0" y="444" class="svg-note" text-anchor="middle" style="fill:#92400e">2.4</text>
+<rect x="424.0" y="428" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="451.0" y="444" class="svg-note" text-anchor="middle" style="fill:#92400e">3.0</text>
+<rect x="482.0" y="428" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="509.0" y="444" class="svg-note" text-anchor="middle" style="fill:#92400e">2.9</text>
+<rect x="540.0" y="428" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="567.0" y="444" class="svg-note" text-anchor="middle" style="fill:#92400e">2.4</text>
+<rect x="598.0" y="428" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="625.0" y="444" class="svg-note" text-anchor="middle" style="fill:#92400e">2.5</text>
+<rect x="656.0" y="428" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="683.0" y="444" class="svg-note" text-anchor="middle" style="fill:#92400e">2.5</text>
+<rect x="714.0" y="428" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="741.0" y="444" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="772.0" y="428" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="799.0" y="444" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="830.0" y="428" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="857.0" y="444" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="888.0" y="428" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="915.0" y="444" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="946.0" y="428" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="973.0" y="444" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="1004.0" y="428" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="1031.0" y="444" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<text x="24" y="473" class="svg-label">AUS · C2yH6j</text>
+<rect x="250.0" y="456" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="277.0" y="472" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="308.0" y="456" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="335.0" y="472" class="svg-note" text-anchor="middle" style="fill:#991b1b">1.2</text>
+<rect x="366.0" y="456" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="393.0" y="472" class="svg-note" text-anchor="middle" style="fill:#991b1b">1.0</text>
+<rect x="424.0" y="456" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="451.0" y="472" class="svg-note" text-anchor="middle" style="fill:#92400e">3.2</text>
+<rect x="482.0" y="456" width="54" height="24" rx="5" fill="#fef3c7"/>
+<text x="509.0" y="472" class="svg-note" text-anchor="middle" style="fill:#92400e">3.3</text>
+<rect x="540.0" y="456" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="567.0" y="472" class="svg-note" text-anchor="middle" style="fill:#991b1b">1.4</text>
+<rect x="598.0" y="456" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="625.0" y="472" class="svg-note" text-anchor="middle" style="fill:#991b1b">0.7</text>
+<rect x="656.0" y="456" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="683.0" y="472" class="svg-note" text-anchor="middle" style="fill:#166534">4.9</text>
+<rect x="714.0" y="456" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="741.0" y="472" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="772.0" y="456" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="799.0" y="472" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="830.0" y="456" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="857.0" y="472" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="888.0" y="456" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="915.0" y="472" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="946.0" y="456" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="973.0" y="472" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="1004.0" y="456" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="1031.0" y="472" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<text x="24" y="501" class="svg-label">FR · UwfFBJ</text>
+<rect x="250.0" y="484" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="277.0" y="500" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="308.0" y="484" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="335.0" y="500" class="svg-note" text-anchor="middle" style="fill:#991b1b">0.5</text>
+<rect x="366.0" y="484" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="393.0" y="500" class="svg-note" text-anchor="middle" style="fill:#991b1b">0.8</text>
+<rect x="424.0" y="484" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="451.0" y="500" class="svg-note" text-anchor="middle" style="fill:#991b1b">1.0</text>
+<rect x="482.0" y="484" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="509.0" y="500" class="svg-note" text-anchor="middle" style="fill:#991b1b">1.1</text>
+<rect x="540.0" y="484" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="567.0" y="500" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="598.0" y="484" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="625.0" y="500" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="656.0" y="484" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="683.0" y="500" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="714.0" y="484" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="741.0" y="500" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="772.0" y="484" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="799.0" y="500" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="830.0" y="484" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="857.0" y="500" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="888.0" y="484" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="915.0" y="500" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="946.0" y="484" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="973.0" y="500" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="1004.0" y="484" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="1031.0" y="500" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<text x="24" y="529" class="svg-label">DE · WGR7yn</text>
+<rect x="250.0" y="512" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="277.0" y="528" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="308.0" y="512" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="335.0" y="528" class="svg-note" text-anchor="middle" style="fill:#991b1b">0.9</text>
+<rect x="366.0" y="512" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="393.0" y="528" class="svg-note" text-anchor="middle" style="fill:#991b1b">0.2</text>
+<rect x="424.0" y="512" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="451.0" y="528" class="svg-note" text-anchor="middle" style="fill:#991b1b">0.6</text>
+<rect x="482.0" y="512" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="509.0" y="528" class="svg-note" text-anchor="middle" style="fill:#991b1b">1.8</text>
+<rect x="540.0" y="512" width="54" height="24" rx="5" fill="#fee2e2"/>
+<text x="567.0" y="528" class="svg-note" text-anchor="middle" style="fill:#991b1b">1.3</text>
+<rect x="598.0" y="512" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="625.0" y="528" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="656.0" y="512" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="683.0" y="528" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="714.0" y="512" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="741.0" y="528" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="772.0" y="512" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="799.0" y="528" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="830.0" y="512" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="857.0" y="528" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="888.0" y="512" width="54" height="24" rx="5" fill="#dcfce7"/>
+<text x="915.0" y="528" class="svg-note" text-anchor="middle" style="fill:#166534">5.7</text>
+<rect x="946.0" y="512" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="973.0" y="528" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<rect x="1004.0" y="512" width="54" height="24" rx="5" fill="#eef1f5"/>
+<text x="1031.0" y="528" class="svg-note" text-anchor="middle" style="fill:#8791a2">-</text>
+<text x="822" y="560" class="svg-axis">阈值：<2x 红 · 2-4x 黄 · 4-6x 浅绿 · >6x 深绿</text>
+</svg></div>
+
+  <h2>3. Campaign 相对所在国家 ROI</h2>
+  <div class="panel"><svg class="chart" viewBox="0 0 1060 666" role="img" aria-label="Campaign ROI 相对所在国家整体 ROI 的差值">
+<rect x="0" y="0" width="1060" height="666" rx="16" fill="#ffffff"/>
+<text x="24" y="30" class="svg-title">Campaign ROI 相对所在国家整体 ROI 的差值</text>
+<line x1="564.0" y1="44" x2="564.0" y2="642" stroke="#cbd5e1" stroke-dasharray="4 4"/>
+<text x="24" y="74" class="svg-label">ES · F4Uf3q</text>
+<rect x="564.0" y="61" width="386.0" height="18" rx="5" fill="#2563eb"/>
+<text x="958.0" y="75" class="svg-value" text-anchor="start">+11.33x</text>
+<text x="24" y="108" class="svg-label">US · v7QnRX</text>
+<rect x="564.0" y="95" width="87.7" height="18" rx="5" fill="#2563eb"/>
+<text x="659.7" y="109" class="svg-value" text-anchor="start">+2.57x</text>
+<text x="24" y="142" class="svg-label">JP · uZYdUY</text>
+<rect x="564.0" y="129" width="87.3" height="18" rx="5" fill="#2563eb"/>
+<text x="659.3" y="143" class="svg-value" text-anchor="start">+2.56x</text>
+<text x="24" y="176" class="svg-label">ES · KynO7d</text>
+<rect x="564.0" y="163" width="66.6" height="18" rx="5" fill="#2563eb"/>
+<text x="638.6" y="177" class="svg-value" text-anchor="start">+1.95x</text>
+<text x="24" y="210" class="svg-label">GB · aAYWAd</text>
+<rect x="564.0" y="197" width="45.7" height="18" rx="5" fill="#2563eb"/>
+<text x="617.7" y="211" class="svg-value" text-anchor="start">+1.34x</text>
+<text x="24" y="244" class="svg-label">IL · NSzoa2</text>
+<rect x="564.0" y="231" width="42.8" height="18" rx="5" fill="#2563eb"/>
+<text x="614.8" y="245" class="svg-value" text-anchor="start">+1.26x</text>
+<text x="24" y="278" class="svg-label">BR · C8w6QM</text>
+<rect x="564.0" y="265" width="33.3" height="18" rx="5" fill="#2563eb"/>
+<text x="605.3" y="279" class="svg-value" text-anchor="start">+0.98x</text>
+<text x="24" y="312" class="svg-label">IT · aPLehU</text>
+<rect x="564.0" y="299" width="31.9" height="18" rx="5" fill="#2563eb"/>
+<text x="603.9" y="313" class="svg-value" text-anchor="start">+0.94x</text>
+<text x="24" y="346" class="svg-label">PL · VnntC5</text>
+<rect x="564.0" y="333" width="28.3" height="18" rx="5" fill="#2563eb"/>
+<text x="600.3" y="347" class="svg-value" text-anchor="start">+0.83x</text>
+<text x="24" y="380" class="svg-label">CL · aG917N</text>
+<rect x="564.0" y="367" width="21.9" height="18" rx="5" fill="#2563eb"/>
+<text x="593.9" y="381" class="svg-value" text-anchor="start">+0.64x</text>
+<text x="24" y="414" class="svg-label">FR · tD7ZrH</text>
+<rect x="564.0" y="401" width="2.2" height="18" rx="5" fill="#2563eb"/>
+<text x="574.2" y="415" class="svg-value" text-anchor="start">+0.06x</text>
+<text x="24" y="448" class="svg-label">BR · rtHodE</text>
+<rect x="557.6" y="435" width="6.4" height="18" rx="5" fill="#dc2626"/>
+<text x="549.6" y="449" class="svg-value" text-anchor="end">-0.19x</text>
+<text x="24" y="482" class="svg-label">AUS · C2yH6j</text>
+<rect x="538.3" y="469" width="25.7" height="18" rx="5" fill="#dc2626"/>
+<text x="530.3" y="483" class="svg-value" text-anchor="end">-0.75x</text>
+<text x="24" y="516" class="svg-label">US · KQzASD</text>
+<rect x="537.0" y="503" width="27.0" height="18" rx="5" fill="#dc2626"/>
+<text x="529.0" y="517" class="svg-value" text-anchor="end">-0.79x</text>
+<text x="24" y="550" class="svg-label">NL · tvXgqW</text>
+<rect x="517.7" y="537" width="46.3" height="18" rx="5" fill="#dc2626"/>
+<text x="509.7" y="551" class="svg-value" text-anchor="end">-1.36x</text>
+<text x="24" y="584" class="svg-label">FR · UwfFBJ</text>
+<rect x="504.1" y="571" width="59.9" height="18" rx="5" fill="#dc2626"/>
+<text x="496.1" y="585" class="svg-value" text-anchor="end">-1.76x</text>
+<text x="24" y="618" class="svg-label">DE · WGR7yn</text>
+<rect x="492.9" y="605" width="71.1" height="18" rx="5" fill="#dc2626"/>
+<text x="484.9" y="619" class="svg-value" text-anchor="end">-2.09x</text>
+</svg></div>
+  <div class="callout warn"><strong>样本提醒：</strong>KynO7ddluR5Ued5R 有效天数较少，结论需要谨慎看。</div>
+  <div class="table-wrap"><table><thead><tr><th>Campaign ID</th><th>Campaign Name</th><th>国家/项目</th><th>近14天 24H ROI</th><th>国家整体ROI</th><th>ROI差值</th><th>6/13 24H ROI</th><th>优于国家天数</th><th>判断</th></tr></thead><tbody><tr class="strong"><td><span class="mono">F4Uf3q8nCIrXk9pe</span></td><td>ES_purchase_ROAS_RE_260503_null</td><td>ES</td><td>16.57x</td><td>5.24x</td><td>+11.33x</td><td>7.68x</td><td>12/13</td><td>强于国家</td></tr><tr class="strong"><td><span class="mono">v7QnRXIVonS5uomZ</span></td><td>US_purchase_ROAS</td><td>US</td><td>7.30x</td><td>4.73x</td><td>+2.57x</td><td>7.61x</td><td>10/13</td><td>强于国家</td></tr><tr class="strong"><td><span class="mono">uZYdUYjX7BfsIDxD</span></td><td>JP_DAC专项_purchase_ROAS</td><td>JP</td><td>6.58x</td><td>4.02x</td><td>+2.56x</td><td>2.49x</td><td>8/13</td><td>强于国家</td></tr><tr class="strong"><td><span class="mono">KynO7ddluR5Ued5R</span></td><td>ES_DAC专项_purchase</td><td>ES</td><td>7.19x</td><td>5.24x</td><td>+1.95x</td><td>-</td><td>2/2</td><td>强于国家</td></tr><tr class="strong"><td><span class="mono">aAYWAdtK8yzGtcMp</span></td><td>GB_purchase_ROAS</td><td>GB</td><td>4.21x</td><td>2.87x</td><td>+1.34x</td><td>3.27x</td><td>11/13</td><td>强于国家</td></tr><tr class="strong"><td><span class="mono">C8w6QMX7C18oiKUy</span></td><td>BR_purchase_ROAS</td><td>BR</td><td>3.74x</td><td>2.77x</td><td>+0.98x</td><td>3.57x</td><td>11/13</td><td>强于国家</td></tr><tr class="strong"><td><span class="mono">aPLehU0cbfzIVdy3</span></td><td>IT_purchase_ROAS</td><td>IT</td><td>4.32x</td><td>3.39x</td><td>+0.94x</td><td>2.65x</td><td>12/13</td><td>强于国家</td></tr><tr class="strong"><td><span class="mono">VnntC5cAaSM427Eb</span></td><td>PL_Exlcude180_ROAS</td><td>PL</td><td>4.38x</td><td>3.55x</td><td>+0.83x</td><td>5.77x</td><td>11/13</td><td>强于国家</td></tr><tr class="strong"><td><span class="mono">aG917NDz5gBw6VRf</span></td><td>CL_purchase_ROAS</td><td>CL</td><td>3.67x</td><td>3.02x</td><td>+0.64x</td><td>4.29x</td><td>12/13</td><td>强于国家</td></tr><tr class="strong"><td><span class="mono">tD7ZrHZpoCqTQwKE</span></td><td>FR_purchase_ROAS</td><td>FR</td><td>2.65x</td><td>2.59x</td><td>+0.06x</td><td>4.38x</td><td>11/13</td><td>强于国家</td></tr><tr class="neutral"><td><span class="mono">NSzoa2gxgzVwWqtv</span></td><td>IL_DAC专项_purchase_ROAS</td><td>IL</td><td>5.47x</td><td>4.21x</td><td>+1.26x</td><td>2.27x</td><td>6/13</td><td>高但波动</td></tr><tr class="weak"><td><span class="mono">rtHodELwUPFTZOsK</span></td><td>BR_DAC专项_purchase_CPA</td><td>BR</td><td>2.58x</td><td>2.77x</td><td>-0.19x</td><td>-</td><td>0/7</td><td>弱于国家</td></tr><tr class="weak"><td><span class="mono">C2yH6jzJz4IzQyzZ</span></td><td>AUS_DAC专项_purchase_CPA</td><td>AUS</td><td>1.69x</td><td>2.44x</td><td>-0.75x</td><td>-</td><td>2/7</td><td>弱于国家</td></tr><tr class="weak"><td><span class="mono">KQzASDugGlYNVUcL</span></td><td>US_DAC专项_purchase_ROAS_RE_260520_null</td><td>US</td><td>3.94x</td><td>4.73x</td><td>-0.79x</td><td>3.64x</td><td>4/13</td><td>弱于国家</td></tr><tr class="weak"><td><span class="mono">tvXgqWrgtHKyOBlL</span></td><td>NL_DAC专项_purchase</td><td>NL</td><td>3.21x</td><td>4.57x</td><td>-1.36x</td><td>-</td><td>2/9</td><td>弱于国家</td></tr><tr class="weak"><td><span class="mono">UwfFBJhBjyhbTpx2</span></td><td>FR_DAC专项_purchase</td><td>FR</td><td>0.83x</td><td>2.59x</td><td>-1.76x</td><td>-</td><td>0/4</td><td>弱于国家</td></tr><tr class="weak"><td><span class="mono">WGR7ynKlrWf9GQ0F</span></td><td>DE_DAC专项_purchase</td><td>DE</td><td>0.74x</td><td>2.83x</td><td>-2.09x</td><td>-</td><td>0/6</td><td>弱于国家</td></tr></tbody></table></div>
+
+  <h2>4. 6/5替换前后 24H ROI</h2>
+  <div class="panel"><svg class="chart" viewBox="0 0 1060 460" role="img" aria-label="6月5日替换前后24H ROI变化">
+<rect x="0" y="0" width="1060" height="460" rx="16" fill="#ffffff"/>
+<text x="24" y="30" class="svg-title">6/5 标注替换前后 24H ROI</text>
+<line x1="82" y1="384.0" x2="1024" y2="384.0" stroke="#cbd5e1"/>
+<rect x="760" y="18" width="16" height="10" rx="2" fill="#94a3b8"/><text x="782" y="27" class="svg-axis">替换前</text>
+<rect x="840" y="18" width="16" height="10" rx="2" fill="#2563eb"/><text x="862" y="27" class="svg-axis">替换后</text>
+<rect x="130.3" y="331.0" width="34.0" height="53.0" rx="5" fill="#94a3b8"/>
+<text x="147.3" y="324.0" class="svg-note" text-anchor="middle">2.3x</text>
+<rect x="168.3" y="221.5" width="34.0" height="162.5" rx="5" fill="#2563eb"/>
+<text x="185.3" y="214.5" class="svg-note" text-anchor="middle">7.1x</text>
+<text x="149.3" y="418" class="svg-tick" text-anchor="middle">CL</text>
+<text x="149.3" y="438" class="svg-tick muted" text-anchor="middle">aG91</text>
+<rect x="264.9" y="307.9" width="34.0" height="76.1" rx="5" fill="#94a3b8"/>
+<text x="281.9" y="300.9" class="svg-note" text-anchor="middle">3.3x</text>
+<rect x="302.9" y="268.8" width="34.0" height="115.2" rx="5" fill="#2563eb"/>
+<text x="319.9" y="261.8" class="svg-note" text-anchor="middle">5.0x</text>
+<text x="283.9" y="418" class="svg-tick" text-anchor="middle">PL</text>
+<text x="283.9" y="438" class="svg-tick muted" text-anchor="middle">Vnnt</text>
+<rect x="399.4" y="293.1" width="34.0" height="90.9" rx="5" fill="#94a3b8"/>
+<text x="416.4" y="286.1" class="svg-note" text-anchor="middle">4.0x</text>
+<rect x="437.4" y="262.3" width="34.0" height="121.7" rx="5" fill="#2563eb"/>
+<text x="454.4" y="255.3" class="svg-note" text-anchor="middle">5.3x</text>
+<text x="418.4" y="418" class="svg-tick" text-anchor="middle">IT</text>
+<text x="418.4" y="438" class="svg-tick muted" text-anchor="middle">aPLe</text>
+<rect x="534.0" y="333.1" width="34.0" height="50.9" rx="5" fill="#94a3b8"/>
+<text x="551.0" y="326.1" class="svg-note" text-anchor="middle">2.2x</text>
+<rect x="572.0" y="78.0" width="34.0" height="306.0" rx="5" fill="#2563eb"/>
+<text x="589.0" y="71.0" class="svg-note" text-anchor="middle">13.4x</text>
+<text x="553.0" y="418" class="svg-tick" text-anchor="middle">GB</text>
+<text x="553.0" y="438" class="svg-tick muted" text-anchor="middle">aAYW</text>
+<rect x="668.6" y="268.2" width="34.0" height="115.8" rx="5" fill="#94a3b8"/>
+<text x="685.6" y="261.2" class="svg-note" text-anchor="middle">5.1x</text>
+<rect x="706.6" y="147.4" width="34.0" height="236.6" rx="5" fill="#2563eb"/>
+<text x="723.6" y="140.4" class="svg-note" text-anchor="middle">10.4x</text>
+<text x="687.6" y="418" class="svg-tick" text-anchor="middle">US</text>
+<text x="687.6" y="438" class="svg-tick muted" text-anchor="middle">v7Qn</text>
+<rect x="803.1" y="303.0" width="34.0" height="81.0" rx="5" fill="#94a3b8"/>
+<text x="820.1" y="296.0" class="svg-note" text-anchor="middle">3.5x</text>
+<rect x="841.1" y="288.3" width="34.0" height="95.7" rx="5" fill="#2563eb"/>
+<text x="858.1" y="281.3" class="svg-note" text-anchor="middle">4.2x</text>
+<text x="822.1" y="418" class="svg-tick" text-anchor="middle">BR</text>
+<text x="822.1" y="438" class="svg-tick muted" text-anchor="middle">C8w6</text>
+<rect x="937.7" y="331.7" width="34.0" height="52.3" rx="5" fill="#94a3b8"/>
+<text x="954.7" y="324.7" class="svg-note" text-anchor="middle">2.3x</text>
+<rect x="975.7" y="276.3" width="34.0" height="107.7" rx="5" fill="#2563eb"/>
+<text x="992.7" y="269.3" class="svg-note" text-anchor="middle">4.7x</text>
+<text x="956.7" y="418" class="svg-tick" text-anchor="middle">FR</text>
+<text x="956.7" y="438" class="svg-tick muted" text-anchor="middle">tD7Z</text>
+</svg></div>
+  <div class="callout"><strong>读法：</strong>这部分只表达替换前后 24H ROI 的变化，不展开其他指标。</div>
+  <div class="table-wrap"><table><thead><tr><th>Campaign ID</th><th>Campaign Name</th><th>国家/项目</th><th>替换前ROI</th><th>替换后ROI</th><th>ROI变化</th><th>有效天数 前/后</th></tr></thead><tbody><tr><td><span class="mono">aG917NDz5gBw6VRf</span></td><td>CL_purchase_ROAS</td><td>CL</td><td>2.32x</td><td>7.11x</td><td>+206.5%</td><td>4/9</td></tr><tr><td><span class="mono">VnntC5cAaSM427Eb</span></td><td>PL_Exlcude180_ROAS</td><td>PL</td><td>3.33x</td><td>5.04x</td><td>+51.5%</td><td>4/9</td></tr><tr><td><span class="mono">aPLehU0cbfzIVdy3</span></td><td>IT_purchase_ROAS</td><td>IT</td><td>3.98x</td><td>5.33x</td><td>+34.0%</td><td>4/9</td></tr><tr><td><span class="mono">aAYWAdtK8yzGtcMp</span></td><td>GB_purchase_ROAS</td><td>GB</td><td>2.23x</td><td>13.40x</td><td>+501.1%</td><td>4/9</td></tr><tr><td><span class="mono">v7QnRXIVonS5uomZ</span></td><td>US_purchase_ROAS</td><td>US</td><td>5.07x</td><td>10.36x</td><td>+104.3%</td><td>4/9</td></tr><tr><td><span class="mono">C8w6QMX7C18oiKUy</span></td><td>BR_purchase_ROAS</td><td>BR</td><td>3.55x</td><td>4.19x</td><td>+18.0%</td><td>4/9</td></tr><tr><td><span class="mono">tD7ZrHZpoCqTQwKE</span></td><td>FR_purchase_ROAS</td><td>FR</td><td>2.29x</td><td>4.71x</td><td>+105.7%</td><td>4/9</td></tr></tbody></table></div>
+
+  <div class="foot">
+    数据源：Downloads/aliexpress_moloco_compaign_data.xlsx sheet“最新” + repo历史 AE 数据。生成脚本：generate_internal_report.py。报告用于内部复盘分享。
+  </div>
+</main>
+</body>
+</html>
