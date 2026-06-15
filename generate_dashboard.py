@@ -92,7 +92,7 @@ def load_data():
 # 已知表头关键词集合（用于数据行污染检测）
 HEADER_KEYWORDS = {
     "ds", "统计时间", "campaign_name", "campaign_namedsp", "campaign_id",
-    "花费", "costdsp", "24h_dac", "session_dac", "dac成本",
+    "花费", "cost", "costdsp", "24h_dac", "session_dac", "session_dau", "dac成本",
     "24h-gmvroi", "24h_gmvroi", "sess-gmvroi",
 }
 
@@ -233,6 +233,7 @@ def _load_xlsx(path):
         "campaign_id":                 ["campaign_id"],
     }
     OPTIONAL_FIELDS = {
+        "dau(session_dau)":            ["session_dau"],
         "dac(24h_dac/session_dac)":    ["24h_dac", "session_dac"],
         "dac_cost":                    ["dac成本"],
         "roi(24h/sess gmvroi)":        ["24h-gmvroi", "24h_gmvroi", "sess-gmvroi"],
@@ -261,7 +262,7 @@ def _load_xlsx(path):
             warnings.append(f"  ℹ️  段#{sec_i+1} (行{h_i+1}) 缺少可选字段: {', '.join(missing_optional)}")
 
         # 花费列：花费 > costdsp
-        spend_i    = _find_col(cm, ["花费", "costdsp", "spend"])
+        spend_i    = _find_col(cm, ["花费", "cost", "costdsp", "spend"])
         gmv_i, roi_i, metric_resolution = _resolve_gmv_roi_cols(raw, h_i, end_i, cm, spend_i)
         if metric_resolution:
             warnings.append(
@@ -272,6 +273,7 @@ def _load_xlsx(path):
         dac_i      = _find_col(cm, ["24h_dac", "session_dac", "dac"])
         # dac成本：新格式直接提供
         dac_cost_i = _find_col(cm, ["dac成本"])
+        dau_i      = _find_col(cm, ["session_dau", "session dau", "dau"])
         name_i     = _find_col(cm, ["campaign_name", "campaign_namedsp"])
         cid_i      = _find_col(cm, ["campaign_id"])
         geo_i      = _find_col(cm, ["geo type", "geo_type", "country", "country_code"])
@@ -322,12 +324,13 @@ def _load_xlsx(path):
                 if roi is None and gmv is not None and spend > 0:
                     roi = gmv / spend
                 dac   = _tf(_gv(row, dac_i)) or 0.0
+                dau   = _tf(_gv(row, dau_i)) or 0.0
                 # dac成本：新格式直接读取；旧格式留 None（由 build_dac_data 按汇总计算）
                 dac_cost = _tf(_gv(row, dac_cost_i)) if dac_cost_i is not None else None
                 all_records.append({
                     "ds": ds_raw, "name": name, "cid": cid,
                     "spend": spend, "roi": roi, "gmv": gmv, "dac": dac, "dac_cost": dac_cost,
-                    "geo": geo,
+                    "dau": dau, "geo": geo,
                 })
                 sec_parsed += 1
             except Exception as e:
@@ -403,7 +406,9 @@ def _load_numbers(path):
         roi   = float(roi_v)   if isinstance(roi_v,   (int, float)) else None
         if roi is None and gmv is not None and spend > 0:
             roi = gmv / spend
-        records.append({"ds": ds, "name": name, "cid": cid, "spend": spend, "roi": roi, "gmv": gmv, "dac": 0, "dac_cost": None, "geo": ""})
+        dau_v = table.cell(r, col.get("session_dau", col.get("dau", 10))).value if ("session_dau" in col or "dau" in col) else 0
+        dau   = float(dau_v)   if isinstance(dau_v,   (int, float)) else 0.0
+        records.append({"ds": ds, "name": name, "cid": cid, "spend": spend, "roi": roi, "gmv": gmv, "dac": 0, "dac_cost": None, "dau": dau, "geo": ""})
     print(f"加载 {len(records)} 行数据")
     return records
 
@@ -480,6 +485,7 @@ def _df_to_records(df, start_ds=None, end_ds=None):
     name_i      = _find_col(cm, ["campaign_name", "campaign_namedsp", "campaign name"])
     cid_i       = _find_col(cm, ["campaign_id", "campaignid", "campaign id"])
     spend_i     = _find_col(cm, ["花费", "spend", "costdsp", "cost"])
+    dau_i       = _find_col(cm, ["session_dau", "session dau", "dau"])
     dac_i       = _find_col(cm, ["24h_dac", "session_dac", "dac"])
     dac_cost_i  = _find_col(cm, ["dac成本", "dac_cost", "dac cost"])
     geo_i       = _find_col(cm, ["geo type", "geo_type", "country", "country_code"])
@@ -513,8 +519,9 @@ def _df_to_records(df, start_ds=None, end_ds=None):
                 roi = gmv / spend
             dac      = _to_float(_value(row, dac_i)) or 0.0
             dac_cost = _to_float(_value(row, dac_cost_i)) if dac_cost_i is not None else None
+            dau      = _to_float(_value(row, dau_i)) or 0.0
             records.append({"ds": ds_raw, "name": name, "cid": cid,
-                            "spend": spend, "roi": roi, "gmv": gmv, "dac": dac, "dac_cost": dac_cost, "geo": geo})
+                            "spend": spend, "roi": roi, "gmv": gmv, "dac": dac, "dac_cost": dac_cost, "dau": dau, "geo": geo})
         except (ValueError, TypeError):
             continue
     print(f"加载 {len(records)} 行数据")
@@ -670,6 +677,91 @@ def build_dac_data(records):
         n_special   = len(dac_special.get("campaigns", {})) if dac_special else 0
         print(f"  [DAC] {key}窗口: {n_countries} 个国家/项目有 dac成本 数据 · DAC专项 {n_special} 个 campaign")
     return result
+
+# ─── DAU 成本数据（cost / session_dau）────────────────────────────────────────
+def build_dau_cost_data(records):
+    """按国家/项目、Campaign、日期聚合 DAU成本：Σcost / Σsession_dau。"""
+    if not records:
+        return {}
+    dates  = get_all_dates(records)
+    labels = fmt_dates(dates)
+    date_set = set(dates)
+
+    # country/project → day → {cost, dau}
+    c_daily = defaultdict(lambda: defaultdict(lambda: {"cost": 0.0, "dau": 0.0}))
+    # country/project → campaign → day → {cost, dau}
+    c_camp = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: {"cost": 0.0, "dau": 0.0})))
+    cid_to_short = {}
+
+    for r in records:
+        if r["ds"] not in date_set:
+            continue
+        dau = r.get("dau") or 0
+        spend = r.get("spend") or 0
+        if dau <= 0 or spend <= 0:
+            continue
+        _, label = classify(r["name"], r.get("geo"))
+        cid = str(r.get("cid") or "").strip()
+        camp_label = cid_to_short.setdefault((label, cid), short_name(r["name"])) if cid else short_name(r["name"])
+
+        c_daily[label][r["ds"]]["cost"] += spend
+        c_daily[label][r["ds"]]["dau"]  += dau
+        c_camp[label][camp_label][r["ds"]]["cost"] += spend
+        c_camp[label][camp_label][r["ds"]]["dau"]  += dau
+
+    country_summary = {}
+    country_metrics = {}
+    country_daily = {}
+    for c, ds_map in c_daily.items():
+        total_cost = sum(b["cost"] for b in ds_map.values())
+        total_dau  = sum(b["dau"] for b in ds_map.values())
+        if total_dau <= 0:
+            continue
+        spend_s = [round(ds_map.get(d, {}).get("cost", 0), 2) for d in dates]
+        dau_s   = [int(round(ds_map.get(d, {}).get("dau", 0), 0)) for d in dates]
+        cost_s  = [
+            round(ds_map[d]["cost"] / ds_map[d]["dau"], 4)
+            if ds_map.get(d, {}).get("dau", 0) > 0 else None
+            for d in dates
+        ]
+        country_summary[c] = {
+            "cost":        round(total_cost, 0),
+            "dau":         int(round(total_dau, 0)),
+            "dau_cost":    round(total_cost / total_dau, 4),
+            "daily_spend": round(total_cost / max(len(dates), 1), 0),
+        }
+        country_metrics[c] = {
+            "spend_series": spend_s,
+            "dau_series":   dau_s,
+            "cost_series":  cost_s,
+        }
+        country_daily[c] = cost_s
+
+    camp_daily = {}
+    for c, camp_map in c_camp.items():
+        camps = {}
+        for camp, ds_map in camp_map.items():
+            series = [
+                round(ds_map[d]["cost"] / ds_map[d]["dau"], 4)
+                if ds_map.get(d, {}).get("dau", 0) > 0 else None
+                for d in dates
+            ]
+            if any(v is not None for v in series):
+                camps[camp] = series
+        if camps:
+            camp_daily[c] = camps
+
+    print(f"  [DAU] all窗口: {len(country_summary)} 个国家/项目有 session_dau 数据")
+    return {
+        "all": {
+            "dates":           dates,
+            "labels":          labels,
+            "country_summary": country_summary,
+            "country_metrics": country_metrics,
+            "country_daily":   country_daily,
+            "camp_daily":      camp_daily,
+        }
+    }
 
 # ─── 日期窗口 ─────────────────────────────────────────────────────────────────
 def get_all_dates(records):
@@ -1017,7 +1109,7 @@ def build_data(records):
     return result
 
 # ─── HTML ─────────────────────────────────────────────────────────────────────
-def generate_html(data_json, all_signals_json, dac_json, generated_at):
+def generate_html(data_json, all_signals_json, dac_json, dau_cost_json, generated_at):
     return f"""<!DOCTYPE html>
 <html lang="zh">
 <head>
@@ -1099,6 +1191,12 @@ canvas{{max-height:340px}}
 .note{{font-size:11px;color:#94a3b8;margin-top:6px}}
 .clear-btn{{font-size:12px;color:#6366f1;cursor:pointer;text-decoration:underline}}
 .empty-hint{{color:#94a3b8;font-size:14px;padding:40px;text-align:center;background:#fff;border-radius:12px;border:1px dashed #e2e8f0}}
+.table-wrap{{overflow:auto;background:#fff;border:1px solid #e2e8f0;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.07);margin-bottom:22px}}
+.metric-table{{width:100%;border-collapse:collapse;font-size:12px;min-width:760px}}
+.metric-table th,.metric-table td{{padding:9px 10px;border-bottom:1px solid #e2e8f0;text-align:right;white-space:nowrap}}
+.metric-table th:first-child,.metric-table td:first-child{{text-align:left;position:sticky;left:0;background:#fff;z-index:1;max-width:360px;overflow:hidden;text-overflow:ellipsis}}
+.metric-table thead th{{background:#f8fafc;color:#475569;font-weight:700}}
+.metric-table thead th:first-child{{background:#f8fafc;z-index:2}}
 .group-chips{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}}
 .chip{{padding:6px 14px;border-radius:99px;border:1.5px solid #e2e8f0;background:#fff;font-size:13px;font-weight:500;cursor:pointer;color:#475569;transition:all .15s}}
 .chip:hover{{border-color:#a5b4fc;color:#4f46e5}}
@@ -1178,6 +1276,7 @@ canvas{{max-height:340px}}
   <div class="tab" onclick="switchTab('project')">项目视图</div>
   <div class="tab" onclick="switchTab('country')">国家视图</div>
   <div class="tab" onclick="switchTab('campaign')">Campaign 视图</div>
+  <div class="tab" onclick="switchTab('dau')">DAU成本</div>
   <div class="tab" onclick="switchTab('dac')">DAC成本</div>
   <div class="period-bar">
     <button class="pbtn" data-period="7" onclick="setPeriod(7)">过去 7 天</button>
@@ -1277,6 +1376,19 @@ canvas{{max-height:340px}}
   </div>
 </div>
 
+<!-- ══ DAU成本 面板 ══ -->
+<div id="panel-dau" class="panel">
+  <div class="section-title">
+    各国家 / 项目 DAU成本（当前日期范围）
+    <span id="clear-dau-country" class="clear-btn" style="display:none" onclick="selectDauCountry(null)">✕ 清除</span>
+  </div>
+  <div class="note" style="margin:-8px 0 16px">DAU成本 = Σcost / Σsession_dau；跟随顶部日期筛选。</div>
+  <div id="dau-country-cards" class="cards"></div>
+  <div id="dau-chart-area">
+    <div class="empty-hint">👆 点击国家 / 项目卡片，查看 DAU成本日趋势和 Campaign 分天明细</div>
+  </div>
+</div>
+
 <!-- ══ DAC成本 面板 ══ -->
 <div id="panel-dac" class="panel">
   <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;flex-wrap:wrap">
@@ -1309,6 +1421,7 @@ canvas{{max-height:340px}}
 const ALL         = {data_json};
 const ALL_SIGNALS = {all_signals_json};
 const DAC_DATA    = {dac_json};
+const DAU_COST_DATA = {dau_cost_json};
 
 const DAC_PALETTE = [
   [59,130,246],[245,158,11],[139,92,246],[236,72,153],[20,184,166],
@@ -1324,10 +1437,12 @@ let selProject     = null;
 let selCountry     = null;
 let selGroup       = null;
 let campMetric     = "both";
+let selDauCountry  = null;
 let selDacCountry  = null;
 let selDacSpecial  = null;
 
 let platformChart=null, projChart=null, countryChart=null, projRefChart=null, campChart=null;
+let dauTrendChart=null, dauCampChart=null;
 let dacTrendChart=null, dacCampChart=null;
 let dacSpecSpendChart=null, dacSpecCostChart=null, dacSpecRoiChart=null;
 
@@ -1391,6 +1506,7 @@ function setCustomDateRange() {{
   setDateInputs();
   updatePeriodButtons();
   renderAll();
+  if (activeTab === "dau") renderDauCost();
   if (activeTab === "dac") renderDac();
 }}
 
@@ -1401,6 +1517,7 @@ function setPeriod(n) {{
   setDateInputs();
   updatePeriodButtons();
   renderAll();
+  if (activeTab === "dau") renderDauCost();
   if (activeTab === "dac") renderDac();
 }}
 
@@ -1424,6 +1541,13 @@ function sliceArr(arr, s, e) {{
 
 function sumVals(arr) {{
   return (arr || []).reduce((s, v) => s + (Number(v) || 0), 0);
+}}
+
+function fmtDauCost(v) {{
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return "-";
+  const n = Number(v);
+  const digits = Math.abs(n) < 1 ? 4 : 2;
+  return "$" + n.toLocaleString(undefined, {{minimumFractionDigits: digits, maximumFractionDigits: digits}});
 }}
 
 function sliceDataset(ds, s, e) {{
@@ -1561,6 +1685,42 @@ function getFilteredDacData() {{
     }});
   }}
   return {{...base, dates: sliceArr(dates, s, e), labels, country_summary, country_daily, camp_daily, dac_special}};
+}}
+
+function getFilteredDauCostData() {{
+  const base = (DAU_COST_DATA || {{}})["all"] || {{}};
+  const dates = base.dates || [];
+  const [s, e] = getSliceRange(dates);
+  if (e < s) return {{labels: [], country_summary: {{}}, country_daily: {{}}, camp_daily: {{}}}};
+  const labels = sliceArr(base.labels, s, e);
+  const country_summary = {{}};
+  const country_daily = {{}};
+  Object.entries(base.country_metrics || {{}}).forEach(([c, m]) => {{
+    const spend = sliceArr(m.spend_series, s, e);
+    const dau = sliceArr(m.dau_series, s, e);
+    const cost = sliceArr(m.cost_series, s, e);
+    const tc = sumVals(spend);
+    const td = sumVals(dau);
+    if (td > 0) {{
+      country_summary[c] = {{
+        cost: Math.round(tc),
+        dau: Math.round(td),
+        dau_cost: Number((tc / td).toFixed(4)),
+        daily_spend: labels.length ? Math.round(tc / labels.length) : 0,
+      }};
+      country_daily[c] = cost;
+    }}
+  }});
+  const camp_daily = {{}};
+  Object.entries(base.camp_daily || {{}}).forEach(([c, camps]) => {{
+    const out = {{}};
+    Object.entries(camps || {{}}).forEach(([camp, vals]) => {{
+      const sliced = sliceArr(vals, s, e);
+      if (sliced.some(v => v !== null && v !== undefined)) out[camp] = sliced;
+    }});
+    if (Object.keys(out).length) camp_daily[c] = out;
+  }});
+  return {{...base, dates: sliceArr(dates, s, e), labels, country_summary, country_daily, camp_daily}};
 }}
 
 // ── Chart factory ────────────────────────────────────────────────────────────
@@ -1837,6 +1997,161 @@ function makeChip(lbl,s,isProj) {{
   chip.title=`均 ROI: ${{s.roi!=null?s.roi+"x":"-"}}`;
   chip.onclick=()=>selectGroup(lbl===selGroup?null:lbl);
   return chip;
+}}
+
+// ── DAU成本 面板 ─────────────────────────────────────────────────────────────
+function selectDauCountry(c) {{
+  selDauCountry = c;
+  renderDauCost();
+}}
+
+function buildDauCostTable(campData, labels) {{
+  const entries = Object.entries(campData || {{}})
+    .sort((a, b) => {{
+      const av = (a[1] || []).filter(v => v !== null && v !== undefined);
+      const bv = (b[1] || []).filter(v => v !== null && v !== undefined);
+      const aa = av.length ? av.reduce((s, v) => s + Number(v || 0), 0) / av.length : 999;
+      const bb = bv.length ? bv.reduce((s, v) => s + Number(v || 0), 0) / bv.length : 999;
+      return aa - bb;
+    }});
+  if (!entries.length) return '<div class="empty-hint">当前筛选下暂无 Campaign DAU成本明细</div>';
+  const head = labels.map(l => `<th>${{l}}</th>`).join('');
+  const rows = entries.map(([camp, vals]) => {{
+    const cells = (vals || []).map(v => `<td>${{v != null ? fmtDauCost(v) : '-'}}</td>`).join('');
+    return `<tr><td title="${{camp}}">${{camp}}</td>${{cells}}</tr>`;
+  }}).join('');
+  return `<div class="table-wrap"><table class="metric-table">
+    <thead><tr><th>Campaign</th>${{head}}</tr></thead>
+    <tbody>${{rows}}</tbody>
+  </table></div>`;
+}}
+
+function renderDauCost() {{
+  if (!DAU_COST_DATA) return;
+  const d = getFilteredDauCostData();
+  const summary = d.country_summary || {{}};
+  const labels = d.labels || [];
+
+  const cardsEl = document.getElementById('dau-country-cards');
+  if (cardsEl) {{
+    cardsEl.innerHTML = '';
+    Object.entries(summary)
+      .sort((a, b) => a[1].dau_cost - b[1].dau_cost)
+      .forEach(([c, s]) => {{
+        const sel = selDauCountry === c;
+        const div = document.createElement('div');
+        div.className = 'card' + (sel ? ' selected' : '');
+        div.innerHTML = `<div class="name">${{c}}</div>
+          <div class="spend">${{fmtDauCost(s.dau_cost)}}</div>
+          <div class="roi">总花费: $${{(s.cost||0).toLocaleString()}} · 日均: $${{(s.daily_spend||0).toLocaleString()}}</div>
+          <div class="roi">session_dau: ${{(s.dau||0).toLocaleString()}}</div>`;
+        div.onclick = () => selectDauCountry(c === selDauCountry ? null : c);
+        cardsEl.appendChild(div);
+      }});
+  }}
+  const clearBtn = document.getElementById('clear-dau-country');
+  if (clearBtn) clearBtn.style.display = selDauCountry ? 'inline' : 'none';
+
+  const area = document.getElementById('dau-chart-area');
+  if (!selDauCountry || !(d.country_daily || {{}})[selDauCountry]) {{
+    area.innerHTML = '<div class="empty-hint">👆 点击国家 / 项目卡片，查看 DAU成本日趋势和 Campaign 分天明细</div>';
+    if (dauTrendChart) {{ dauTrendChart.destroy(); dauTrendChart = null; }}
+    if (dauCampChart)  {{ dauCampChart.destroy();  dauCampChart = null; }}
+    return;
+  }}
+
+  area.innerHTML = `
+    <div class="chart-box">
+      <div class="chart-hd">${{selDauCountry}} — DAU成本日趋势
+        <span class="badge">Σcost / Σsession_dau</span></div>
+      <canvas id="dauTrendChart"></canvas>
+      <div class="note">按天汇总该国家 / 项目下所有 campaign 的 cost 与 session_dau</div>
+    </div>
+    <div class="chart-box">
+      <div class="chart-hd">${{selDauCountry}} — Campaign DAU成本
+        <span class="badge">分 Campaign 分天</span></div>
+      <canvas id="dauCampChart"></canvas>
+      <div class="note">图例可点击隐藏 / 显示单个 Campaign</div>
+    </div>
+    <div class="chart-hd">${{selDauCountry}} — Campaign DAU成本明细表
+      <span class="badge">每格 = 当日 cost / session_dau</span></div>
+    ${{buildDauCostTable((d.camp_daily || {{}})[selDauCountry], labels)}}`;
+
+  const cData = d.country_daily[selDauCountry];
+  if (dauTrendChart) dauTrendChart.destroy();
+  dauTrendChart = new Chart(document.getElementById('dauTrendChart'), {{
+    type: 'line',
+    data: {{ labels, datasets: [{{
+      label: selDauCountry + ' DAU成本',
+      data: cData,
+      borderColor: '#0ea5e9',
+      backgroundColor: 'rgba(14,165,233,0.08)',
+      fill: true,
+      borderWidth: 2.5, pointRadius: 5, pointHoverRadius: 7,
+      tension: 0.3, spanGaps: true,
+    }}] }},
+    options: {{
+      responsive: true,
+      interaction: {{ mode: 'index', intersect: false }},
+      scales: {{
+        x: {{ grid: {{ color: 'rgba(0,0,0,.05)' }}, ticks: {{ font: {{ size: 12 }} }} }},
+        y: {{
+          title: {{ display: true, text: 'DAU成本 (USD)', font: {{ size: 12 }} }},
+          ticks: {{ callback: v => fmtDauCost(v), font: {{ size: 11 }} }}, min: 0,
+        }},
+      }},
+      plugins: {{
+        legend: {{ display: false }},
+        tooltip: {{ callbacks: {{ label: ctx => ctx.dataset.label + ': ' + fmtDauCost(ctx.parsed.y) }} }},
+        datalabels: {{
+          display: true,
+          formatter: v => v != null ? fmtDauCost(v) : null,
+          color: '#0ea5e9', font: {{ size: 11, weight: '700' }},
+          anchor: 'top', align: 'top', offset: 3,
+          backgroundColor: 'rgba(255,255,255,0.85)', borderRadius: 3,
+          padding: {{ top: 2, bottom: 2, left: 4, right: 4 }},
+        }},
+      }},
+    }},
+  }});
+
+  const campData = ((d.camp_daily || {{}})[selDauCountry]) || {{}};
+  const campDs = Object.entries(campData).map(([camp, vals], i) => {{
+    const [rv, gv, bv] = DAC_PALETTE[i % DAC_PALETTE.length];
+    return {{
+      label: camp, data: vals,
+      borderColor: `rgb(${{rv}},${{gv}},${{bv}})`,
+      backgroundColor: 'transparent',
+      borderWidth: 2, pointRadius: 4, pointHoverRadius: 6,
+      tension: 0.3, spanGaps: true,
+    }};
+  }});
+  if (dauCampChart) dauCampChart.destroy();
+  dauCampChart = new Chart(document.getElementById('dauCampChart'), {{
+    type: 'line',
+    data: {{ labels, datasets: campDs }},
+    options: {{
+      responsive: true,
+      interaction: {{ mode: 'index', intersect: false }},
+      scales: {{
+        x: {{ grid: {{ color: 'rgba(0,0,0,.05)' }}, ticks: {{ font: {{ size: 12 }} }} }},
+        y: {{
+          title: {{ display: true, text: 'DAU成本 (USD)', font: {{ size: 12 }} }},
+          ticks: {{ callback: v => fmtDauCost(v), font: {{ size: 11 }} }}, min: 0,
+        }},
+      }},
+      plugins: {{
+        legend: {{ position: 'top', labels: {{ font: {{ size: 12 }}, usePointStyle: true, pointStyleWidth: 12 }} }},
+        tooltip: {{ callbacks: {{ label: ctx => {{
+          const v = ctx.parsed.y;
+          return v != null ? ctx.dataset.label + ': ' + fmtDauCost(v) : null;
+        }} }} }},
+        datalabels: {{
+          display: false,
+        }},
+      }},
+    }},
+  }});
 }}
 
 // ── DAC成本 面板 ─────────────────────────────────────────────────────────────
@@ -2195,7 +2510,7 @@ function setCampMetric(m){{campMetric=m;renderCampaign();}}
 
 function switchTab(name){{
   activeTab=name;
-  const names=["home","project","country","campaign","dac"];
+  const names=["home","project","country","campaign","dau","dac"];
   document.querySelectorAll(".tab").forEach((t,i)=>t.classList.toggle("active",names[i]===name));
   document.querySelectorAll(".panel").forEach(p=>p.classList.remove("active"));
   document.getElementById("panel-"+name).classList.add("active");
@@ -2204,6 +2519,7 @@ function switchTab(name){{
   else if(name==="project") renderProject();
   else if(name==="country") renderCountry();
   else if(name==="campaign") renderCampaign();
+  else if(name==="dau") renderDauCost();
   else if(name==="dac") renderDac();
 }}
 
@@ -2229,13 +2545,15 @@ def main():
     records      = load_data()
     data         = build_data(records)
     dac_data     = build_dac_data(records)
+    dau_cost_data = build_dau_cost_data(records)
     all_signals, overall_roi = compute_all_signals(records)
 
     data_json        = json.dumps(data,        ensure_ascii=False)
     all_signals_json = json.dumps(all_signals, ensure_ascii=False)
     dac_json         = json.dumps(dac_data,    ensure_ascii=False)
+    dau_cost_json    = json.dumps(dau_cost_data, ensure_ascii=False)
     generated        = datetime.now().strftime("%Y-%m-%d %H:%M")
-    html             = generate_html(data_json, all_signals_json, dac_json, generated)
+    html             = generate_html(data_json, all_signals_json, dac_json, dau_cost_json, generated)
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         f.write(html)
