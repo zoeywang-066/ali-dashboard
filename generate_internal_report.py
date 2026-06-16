@@ -70,6 +70,12 @@ def fmt_short_ds(ds: str) -> str:
     return f"{int(ds[4:6])}/{int(ds[6:8])}"
 
 
+def fmt_money(value, digits: int = 0) -> str:
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return "-"
+    return f"${value:,.{digits}f}"
+
+
 def fmt_num(value, digits: int = 2, suffix: str = "") -> str:
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return "-"
@@ -325,6 +331,90 @@ def compute_replacement(records: list[dict]) -> dict:
     return {"rows": rows, "before": "2026-05-31~2026-06-04", "after": "2026-06-05~2026-06-13"}
 
 
+def compute_replacement_daily(records: list[dict], dates: list[str]) -> dict:
+    ids = set(REPLACEMENT_IDS)
+    date_set = set(dates)
+    agg = defaultdict(lambda: {
+        "names": defaultdict(float),
+        "labels": defaultdict(float),
+        "daily": defaultdict(lambda: {"spend": 0.0, "roi_weight": 0.0, "roi_spend": 0.0}),
+    })
+
+    for record in records:
+        ds = record.get("ds")
+        cid = str(record.get("cid") or "").strip()
+        if ds not in date_set or cid not in ids:
+            continue
+        spend = record.get("spend") or 0.0
+        roi = record.get("roi")
+        agg[cid]["names"][record.get("name", "")] += spend
+        agg[cid]["labels"][label_for_record(record)] += spend
+        bucket = agg[cid]["daily"][ds]
+        bucket["spend"] += spend
+        if roi is not None and roi > 0 and spend > 0:
+            bucket["roi_weight"] += roi * spend
+            bucket["roi_spend"] += spend
+
+    rows = []
+    detail = []
+    for cid in REPLACEMENT_IDS:
+        item = agg[cid]
+        spend_series = []
+        roi_series = []
+        before = {"spend": 0.0, "roi_weight": 0.0, "roi_spend": 0.0}
+        after = {"spend": 0.0, "roi_weight": 0.0, "roi_spend": 0.0}
+        for ds in dates:
+            bucket = item["daily"].get(ds, {"spend": 0.0, "roi_weight": 0.0, "roi_spend": 0.0})
+            roi = weighted_roi(bucket)
+            spend = bucket["spend"]
+            spend_series.append(spend)
+            roi_series.append(roi)
+            target = after if ds >= "20260605" else before
+            target["spend"] += spend
+            target["roi_weight"] += bucket["roi_weight"]
+            target["roi_spend"] += bucket["roi_spend"]
+            detail.append(
+                {
+                    "date": fmt_ds(ds),
+                    "cid": f'<span class="mono">{esc(cid)}</span>',
+                    "name": esc(primary_name(item["names"])),
+                    "label": esc(combined_label(item["labels"])),
+                    "spend": fmt_money(spend, 0),
+                    "roi": fmt_num(roi, 2, "x"),
+                }
+            )
+        before_roi = weighted_roi(before)
+        after_roi = weighted_roi(after)
+        rows.append(
+            {
+                "cid": cid,
+                "name": primary_name(item["names"]),
+                "label": combined_label(item["labels"]),
+                "spend": spend_series,
+                "roi": roi_series,
+                "total_spend": sum(spend_series),
+                "latest_spend": spend_series[-1] if spend_series else None,
+                "latest_roi": roi_series[-1] if roi_series else None,
+                "before_roi": before_roi,
+                "after_roi": after_roi,
+                "roi_change": (after_roi / before_roi - 1) * 100 if before_roi and after_roi else None,
+            }
+        )
+
+    total_spend = sum(sum(row["spend"]) for row in rows)
+    latest_spend = sum((row["latest_spend"] or 0) for row in rows)
+    return {
+        "dates": dates,
+        "rows": rows,
+        "detail": detail,
+        "summary": {
+            "total_spend": total_spend,
+            "latest_spend": latest_spend,
+            "latest_date": dates[-1] if dates else None,
+        },
+    }
+
+
 def svg_roi_line(dates: list[str], roi: list[float | None], title: str) -> str:
     width, height = 1060, 360
     left, right, top, bottom = 64, 60, 42, 58
@@ -494,6 +584,80 @@ def svg_grouped_replacement(rows: list[dict]) -> str:
     return "\n".join(parts)
 
 
+def svg_replacement_daily_trends(rows: list[dict], dates: list[str]) -> str:
+    width = 1160
+    left, right = 92, 86
+    top = 54
+    row_h = 176
+    plot_h = 92
+    plot_w = width - left - right
+    height = top + row_h * len(rows) + 48
+    marker_ds = "20260605"
+    marker_idx = dates.index(marker_ds) if marker_ds in dates else None
+
+    def x_at(i: int) -> float:
+        return left + plot_w * i / max(len(dates) - 1, 1)
+
+    parts = [
+        f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" aria-label="6月5日替换campaign每日消耗和ROI趋势">',
+        f'<rect x="0" y="0" width="{width}" height="{height}" rx="16" fill="#ffffff"/>',
+        '<text x="24" y="30" class="svg-title">6/5 替换 Campaign：分天消耗与 24H ROI 趋势</text>',
+        '<rect x="760" y="18" width="16" height="10" rx="2" fill="#bfdbfe"/><text x="782" y="27" class="svg-axis">消耗</text>',
+        '<line x1="830" y1="23" x2="850" y2="23" stroke="#ea580c" stroke-width="3.5"/><text x="858" y="27" class="svg-axis">24H ROI</text>',
+        '<line x1="930" y1="23" x2="950" y2="23" stroke="#dc2626" stroke-width="2.5" stroke-dasharray="4 4"/><text x="958" y="27" class="svg-axis">6/5 替换</text>',
+    ]
+
+    for i, row in enumerate(rows):
+        y0 = top + i * row_h
+        chart_top = y0 + 34
+        chart_base = chart_top + plot_h
+        max_spend = max(row["spend"]) if row["spend"] else 1
+        roi_vals = [v for v in row["roi"] if v is not None]
+        max_roi = max(roi_vals) if roi_vals else 1
+        min_roi = min(roi_vals) if roi_vals else 0
+        if math.isclose(min_roi, max_roi):
+            min_roi = 0
+        padding = max((max_roi - min_roi) * 0.16, 0.5)
+        min_roi = max(0, min_roi - padding)
+        max_roi += padding
+        bar_w = max(6, min(28, plot_w / max(len(dates), 1) * 0.56))
+
+        def y_roi(value: float) -> float:
+            return chart_base - ((value - min_roi) / max(max_roi - min_roi, 0.001)) * plot_h
+
+        label = f'{row["label"]} · {row["cid"]} · {row["name"]}'
+        parts.append(f'<text x="24" y="{y0 + 18}" class="svg-label">{esc(label)}</text>')
+        parts.append(f'<text x="{width - right}" y="{y0 + 18}" class="svg-note" text-anchor="end">最新: {fmt_money(row["latest_spend"], 0)} · ROI {fmt_num(row["latest_roi"], 2, "x")}</text>')
+        parts.append(f'<line x1="{left}" y1="{chart_base:.1f}" x2="{width - right}" y2="{chart_base:.1f}" stroke="#d8dee8"/>')
+        for t in range(3):
+            rv = min_roi + (max_roi - min_roi) * t / 2
+            y = y_roi(rv)
+            parts.append(f'<line x1="{left}" y1="{y:.1f}" x2="{width - right}" y2="{y:.1f}" stroke="#edf1f7"/>')
+            parts.append(f'<text x="{width - right + 8}" y="{y + 4:.1f}" class="svg-tick">{rv:.1f}x</text>')
+        if marker_idx is not None:
+            mx = x_at(marker_idx)
+            parts.append(f'<line x1="{mx:.1f}" y1="{chart_top - 16}" x2="{mx:.1f}" y2="{chart_base + 18}" stroke="#dc2626" stroke-width="2" stroke-dasharray="5 5"/>')
+            parts.append(f'<text x="{mx + 5:.1f}" y="{chart_top - 5}" class="svg-note" style="fill:#dc2626">6/5替换</text>')
+        for j, spend in enumerate(row["spend"]):
+            x = x_at(j)
+            h = (spend / max_spend) * (plot_h * 0.78) if max_spend > 0 else 0
+            parts.append(f'<rect x="{x - bar_w / 2:.1f}" y="{chart_base - h:.1f}" width="{bar_w:.1f}" height="{max(h, 1):.1f}" rx="3" fill="#bfdbfe"/>')
+        points = []
+        for j, roi in enumerate(row["roi"]):
+            if roi is not None:
+                points.append((x_at(j), y_roi(roi), roi))
+        if points:
+            polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y, _ in points)
+            parts.append(f'<polyline points="{polyline}" fill="none" stroke="#ea580c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>')
+            for x, y, roi in points:
+                parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.5" fill="#ea580c"/>')
+        for j, ds in enumerate(dates):
+            if j % 3 == 0 or j == len(dates) - 1 or ds == marker_ds:
+                parts.append(f'<text x="{x_at(j):.1f}" y="{chart_base + 32}" class="svg-tick" text-anchor="middle">{fmt_short_ds(ds)}</text>')
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
 def table(headers: list[tuple[str, str]], rows: list[dict], row_class=None) -> str:
     head = "".join(f"<th>{esc(title)}</th>" for _, title in headers)
     body_rows = []
@@ -507,9 +671,11 @@ def table(headers: list[tuple[str, str]], rows: list[dict], row_class=None) -> s
 def render_report(context: dict) -> str:
     campaign = context["campaign"]
     replacement = context["replacement"]
+    replacement_daily = context["replacement_daily"]
     selected = context["selected"]
     latest_ds = context["latest_ds"]
     last14_label = f"{fmt_ds(context['last14'][0])} ~ {fmt_ds(context['last14'][-1])}"
+    replacement_range = f"{fmt_ds(replacement_daily['dates'][0])} ~ {fmt_ds(replacement_daily['dates'][-1])}"
 
     campaign_rows_sorted = campaign["rows"]
     heatmap_rows = sorted(campaign_rows_sorted, key=lambda r: r["camp_roi"] if r["camp_roi"] is not None else -1, reverse=True)
@@ -565,6 +731,25 @@ def render_report(context: dict) -> str:
             }
         )
 
+    replacement_daily_rows = []
+    for r in replacement_daily["rows"]:
+        replacement_daily_rows.append(
+            {
+                "cid": f'<span class="mono">{esc(r["cid"])}</span>',
+                "name": esc(r["name"]),
+                "label": esc(r["label"]),
+                "total_spend": fmt_money(r["total_spend"], 0),
+                "latest_spend": fmt_money(r["latest_spend"], 0),
+                "latest_roi": fmt_num(r["latest_roi"], 2, "x"),
+                "before_roi": fmt_num(r["before_roi"], 2, "x"),
+                "after_roi": fmt_num(r["after_roi"], 2, "x"),
+                "roi_change": fmt_pct(r["roi_change"]),
+            }
+        )
+    replacement_detail_rows = sorted(replacement_daily["detail"], key=lambda r: (r["date"], r["cid"]))
+    replacement_latest_rows = [r for r in replacement_daily["rows"] if r.get("latest_roi") is not None]
+    replacement_latest_best = max(replacement_latest_rows, key=lambda r: r["latest_roi"]) if replacement_latest_rows else None
+
     css = """
     :root {
       --bg: #f6f7fb;
@@ -610,6 +795,31 @@ def render_report(context: dict) -> str:
     .kpi .note { color: var(--muted); font-size: 12px; margin-top: 8px; }
     .panel { padding: 18px; margin: 14px 0; }
     .summary { grid-template-columns: 1.2fr 1fr; }
+    .tabbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+      margin: 0 0 22px;
+      padding-bottom: 8px;
+    }
+    .tab-btn {
+      appearance: none;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--muted);
+      border-radius: 7px;
+      padding: 10px 14px;
+      font: 700 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      cursor: pointer;
+    }
+    .tab-btn.active {
+      color: #fff;
+      border-color: var(--blue);
+      background: var(--blue);
+    }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
     .callout {
       border-left: 4px solid var(--blue);
       padding: 14px 16px;
@@ -626,6 +836,7 @@ def render_report(context: dict) -> str:
     .svg-axis, .svg-tick { font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #657084; }
     .muted { fill: #8791a2; }
     .table-wrap { overflow-x: auto; background: #fff; border: 1px solid var(--line); border-radius: 8px; }
+    .dense-table .table-wrap { max-height: 560px; overflow: auto; }
     table { width: 100%; border-collapse: collapse; min-width: 860px; }
     th, td { padding: 10px 12px; border-bottom: 1px solid #edf0f5; text-align: left; vertical-align: top; }
     th { font-size: 12px; color: #526074; background: #f9fafc; white-space: nowrap; }
@@ -655,6 +866,7 @@ def render_report(context: dict) -> str:
       main { width: min(100vw - 24px, 1180px); padding-top: 18px; }
       h1 { font-size: 26px; }
       .kpis, .summary { grid-template-columns: 1fr; }
+      .tabbar { overflow-x: auto; }
       .kpi { min-height: auto; }
     }
     """
@@ -671,6 +883,7 @@ def render_report(context: dict) -> str:
     heatmap_chart = svg_roi_heatmap(heatmap_rows, campaign["dates"])
     campaign_chart = svg_bar_chart(campaign_chart_rows, "diff", "label", "Campaign ROI 相对所在国家整体 ROI 的差值", lambda v: fmt_num(v, 2, "x") if v < 0 else f"+{fmt_num(v, 2, 'x')}")
     replacement_chart = svg_grouped_replacement(replacement["rows"])
+    replacement_daily_chart = svg_replacement_daily_trends(replacement_daily["rows"], replacement_daily["dates"])
 
     if campaign["missing"]:
         missing_campaign = ", ".join(f'<span class="mono">{esc(cid)}</span>' for cid in campaign["missing"])
@@ -699,6 +912,12 @@ def render_report(context: dict) -> str:
     </div>
   </header>
 
+  <nav class="tabbar" aria-label="report tabs">
+    <button class="tab-btn active" type="button" data-tab="overview" onclick="showTab('overview')">Campaign ROI 总览</button>
+    <button class="tab-btn" type="button" data-tab="replacement-daily" onclick="showTab('replacement-daily')">6/5替换专项</button>
+  </nav>
+
+  <section id="tab-overview" class="tab-panel active">
   <section class="grid summary">
     <div class="panel">
       <h3>内部分享主结论</h3>
@@ -706,14 +925,14 @@ def render_report(context: dict) -> str:
         <li>近14天列举 campaign 组合 24H ROI 为 {fmt_num(selected["summary"]["roi"], 2, "x")}，最新日为 {fmt_num(selected["summary"]["latest_roi"], 2, "x")}。</li>
         <li>相对所在国家整体 ROI 表现最强的是 {esc(top_diff_text)}。</li>
         <li>弱于所在国家整体 ROI 的主要是 {esc(bottom_diff_text)}，这几条更适合先观察或压低优先级。</li>
-        <li>6/5 标注替换的 7 个 campaign 替换后 24H ROI 全部提升；其中 aAYWAdtK8yzGtcMp、aG917NDz5gBw6VRf、tD7ZrHZpoCqTQwKE、v7QnRXIVonS5uomZ 的 ROI 增幅最明显。</li>
+        <li>6/5 标注替换的 7 个 campaign 已放到单独 tab，按 2026-05-23 到最新日期展示分天消耗和 ROI 趋势。</li>
       </ul>
     </div>
     <div class="panel">
       <h3>口径说明</h3>
       <p>Campaign ROI 使用数据表里的 campaign 24H ROI，并按该 campaign 当日权重加权。</p>
       <p>国家/项目整体 ROI 使用同 label 的 Σ24h_gmv / Σcost，用于判断 campaign 是否强于所在国家整体表现。</p>
-      <p>6/5替换对比窗口：替换前 {esc(replacement["before"])}，替换后 {esc(replacement["after"])}；这里只看 24H ROI 变化。</p>
+      <p>6/5替换专项 tab 从 2026-05-23 到最新日期展示每日消耗与 24H ROI，并用红色虚线标注 2026-06-05。</p>
     </div>
   </section>
 
@@ -738,22 +957,61 @@ def render_report(context: dict) -> str:
       ("status", "判断"),
   ], campaign_rows, campaign_row_class)}
 
-  <h2>4. 6/5替换前后 24H ROI</h2>
-  <div class="panel">{replacement_chart}</div>
-  <div class="callout"><strong>读法：</strong>这部分只表达替换前后 24H ROI 的变化，不展开其他指标。</div>
-  {table([
-      ("cid", "Campaign ID"),
-      ("name", "Campaign Name"),
-      ("label", "国家/项目"),
-      ("before_roi", "替换前ROI"),
-      ("after_roi", "替换后ROI"),
-      ("roi_change", "ROI变化"),
-      ("days", "有效天数 前/后"),
-  ], replacement_rows)}
+  </section>
+
+  <section id="tab-replacement-daily" class="tab-panel">
+    <section class="grid kpis">
+      <div class="kpi"><div class="label">替换 Campaign 数</div><div class="value">{len(replacement_daily["rows"])} 个</div><div class="note">均标注 2026-06-05 替换</div></div>
+      <div class="kpi"><div class="label">趋势日期范围</div><div class="value">{fmt_short_ds(replacement_daily["dates"][0])} - {fmt_short_ds(replacement_daily["dates"][-1])}</div><div class="note">{esc(replacement_range)}</div></div>
+      <div class="kpi"><div class="label">累计消耗</div><div class="value">{fmt_money(replacement_daily["summary"]["total_spend"], 0)}</div><div class="note">7个campaign合计</div></div>
+      <div class="kpi"><div class="label">最新日最高ROI</div><div class="value">{fmt_num(replacement_latest_best["latest_roi"] if replacement_latest_best else None, 2, "x")}</div><div class="note">{esc(replacement_latest_best["cid"] if replacement_latest_best else "-")}</div></div>
+    </section>
+
+    <div class="callout"><strong>特殊标注：</strong>下面 7 个 campaign 均按 2026-06-05 替换处理，趋势图里的红色虚线就是替换日期。</div>
+
+    <h2>6/5替换 Campaign 分天消耗与 ROI 趋势</h2>
+    <div class="panel">{replacement_daily_chart}</div>
+
+    <h2>替换 Campaign 汇总</h2>
+    {table([
+        ("cid", "Campaign ID"),
+        ("name", "Campaign Name"),
+        ("label", "国家/项目"),
+        ("total_spend", "5/23至最新累计消耗"),
+        ("latest_spend", f"{fmt_short_ds(latest_ds)} 消耗"),
+        ("latest_roi", f"{fmt_short_ds(latest_ds)} 24H ROI"),
+        ("before_roi", "6/5前ROI"),
+        ("after_roi", "6/5后ROI"),
+        ("roi_change", "ROI变化"),
+    ], replacement_daily_rows)}
+
+    <h2>分天明细</h2>
+    <div class="dense-table">
+    {table([
+        ("date", "日期"),
+        ("cid", "Campaign ID"),
+        ("name", "Campaign Name"),
+        ("label", "国家/项目"),
+        ("spend", "消耗"),
+        ("roi", "24H ROI"),
+    ], replacement_detail_rows)}
+    </div>
+  </section>
 
   <div class="foot">
     数据源：Downloads/aliexpress_moloco_compaign_data.xlsx sheet“最新” + repo历史 AE 数据。生成脚本：generate_internal_report.py。报告用于内部复盘分享。
   </div>
+  <script>
+    function showTab(name, updateHash = true) {{
+      document.querySelectorAll('.tab-panel').forEach(panel => panel.classList.toggle('active', panel.id === 'tab-' + name));
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === name));
+      if (updateHash) window.location.hash = name;
+    }}
+    document.addEventListener('DOMContentLoaded', () => {{
+      const initial = (window.location.hash || '').replace('#', '') || 'overview';
+      showTab(initial === 'replacement-daily' ? initial : 'overview', false);
+    }});
+  </script>
 </main>
 </body>
 </html>
@@ -767,12 +1025,14 @@ def main() -> None:
         raise RuntimeError("No valid dates found in source data.")
     latest_ds = dates[-1]
     last14 = gd.get_window(records, 14)
+    replacement_dates = [d for d in dates if "20260523" <= d <= latest_ds]
     context = {
         "latest_ds": latest_ds,
         "last14": last14,
         "selected": compute_selected_campaign_trend(records, last14),
         "campaign": compute_campaign_vs_country(records, last14),
         "replacement": compute_replacement(records),
+        "replacement_daily": compute_replacement_daily(records, replacement_dates),
     }
     html_text = render_report(context)
     OUTPUT_FILE.write_text(html_text, encoding="utf-8")
@@ -780,7 +1040,9 @@ def main() -> None:
         "output": str(OUTPUT_FILE),
         "latest_ds": latest_ds,
         "last14": [last14[0], last14[-1]],
+        "replacement_daily": [replacement_dates[0], replacement_dates[-1]],
         "campaigns": len(context["campaign"]["rows"]),
+        "replacement_campaigns": len(context["replacement_daily"]["rows"]),
         "selected_campaign_roi": context["selected"]["summary"]["roi"],
         "missing_campaigns": context["campaign"]["missing"],
     }
