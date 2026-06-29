@@ -39,7 +39,7 @@ def is_other_channel(name):
 def classify(name, geo=None):
     if not name: return ("country", "未知")
     if re.search(r'\bJBP\b|JBP品牌', name, re.IGNORECASE):
-        return ("project", "专享")
+        return ("project", "JBP")
     if "EU10"    in name: return ("project", "EU10")
     if "海托"    in name: return ("project", "海托")
     if "欧洲本地" in name: return ("project", "欧洲本地")
@@ -781,7 +781,7 @@ def aggregate(records, dates):
     date_set    = set(dates)
     proj_agg    = defaultdict(lambda: defaultdict(lambda: {"spend":0,"gmv":0}))
     country_agg = defaultdict(lambda: defaultdict(lambda: {"spend":0,"gmv":0}))
-    camp_agg    = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: {"spend":0,"ws":0,"wsr":0})))
+    camp_agg    = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: {"spend":0,"gmv":0})))
     cid_to_short = {}
 
     for r in records:
@@ -798,9 +798,7 @@ def aggregate(records, dates):
             sn = short_name(r["name"])
         cb = camp_agg[label][sn][r["ds"]]
         cb["spend"] += r["spend"]
-        if r["roi"] and r["roi"] > 0 and r["spend"] > 0:   # 单 campaign 仍直接用 24h-gmvroi 字段
-            cb["ws"]  += r["spend"]
-            cb["wsr"] += r["roi"] * r["spend"]
+        cb["gmv"]   += (r.get("gmv") or 0)                  # 单 campaign 同样用 Σ24h_gmv / Σcostdsp
 
     def to_series(agg_dict):
         result = {}
@@ -823,9 +821,9 @@ def aggregate(records, dates):
             for camp_label, ds_map in camp_map.items():
                 spend_list, roi_list = [], []
                 for d in dates:
-                    b = ds_map.get(d, {"spend":0,"ws":0,"wsr":0})
+                    b = ds_map.get(d, {"spend":0,"gmv":0})
                     spend_list.append(round(b["spend"], 2))
-                    roi_list.append(round(b["wsr"]/b["ws"], 2) if b["ws"] > 0 else None)
+                    roi_list.append(round(b["gmv"]/b["spend"], 2) if b["spend"] > 0 else None)
                 if sum(s for s in spend_list if s) > 0:
                     gcamps[camp_label] = {"spend": spend_list, "roi": roi_list}
             if gcamps:
@@ -1009,7 +1007,7 @@ PROJECT_COLORS = {
     "EU10":    {"bar": "rgba(99,102,241,0.75)",  "line": "#4f46e5"},
     "海托":    {"bar": "rgba(239,68,68,0.75)",   "line": "#dc2626"},
     "欧洲本地": {"bar": "rgba(16,185,129,0.75)", "line": "#059669"},
-    "专享":    {"bar": "rgba(245,158,11,0.75)",  "line": "#d97706"},
+    "JBP":     {"bar": "rgba(245,158,11,0.75)",  "line": "#d97706"},
 }
 PALETTE = [
     (59,130,246),(245,158,11),(139,92,246),(236,72,153),(20,184,166),
