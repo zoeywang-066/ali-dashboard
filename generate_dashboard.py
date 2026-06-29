@@ -38,6 +38,8 @@ def is_other_channel(name):
 # ─── 分类 & 名称 ─────────────────────────────────────────────────────────────
 def classify(name, geo=None):
     if not name: return ("country", "未知")
+    if re.search(r'\bJBP\b|JBP品牌', name, re.IGNORECASE):
+        return ("project", "专享")
     if "EU10"    in name: return ("project", "EU10")
     if "海托"    in name: return ("project", "海托")
     if "欧洲本地" in name: return ("project", "欧洲本地")
@@ -1007,6 +1009,7 @@ PROJECT_COLORS = {
     "EU10":    {"bar": "rgba(99,102,241,0.75)",  "line": "#4f46e5"},
     "海托":    {"bar": "rgba(239,68,68,0.75)",   "line": "#dc2626"},
     "欧洲本地": {"bar": "rgba(16,185,129,0.75)", "line": "#059669"},
+    "专享":    {"bar": "rgba(245,158,11,0.75)",  "line": "#d97706"},
 }
 PALETTE = [
     (59,130,246),(245,158,11),(139,92,246),(236,72,153),(20,184,166),
