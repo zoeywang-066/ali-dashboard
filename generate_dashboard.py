@@ -265,6 +265,7 @@ def _load_xlsx(path):
 
         # 花费列：花费 > costdsp
         spend_i    = _find_col(cm, ["花费", "cost", "costdsp", "spend"])
+        rebate_spend_i = _find_col(cm, ["costdsp返点后", "返点后costdsp", "返点后花费", "rebate_cost", "cost_after_rebate"])
         gmv_i, roi_i, metric_resolution = _resolve_gmv_roi_cols(raw, h_i, end_i, cm, spend_i)
         if metric_resolution:
             warnings.append(
@@ -321,8 +322,10 @@ def _load_xlsx(path):
                 cid   = _gv(row, cid_i) or ""
                 geo   = _gv(row, geo_i) or ""
                 spend = _tf(spend_raw) or 0.0
+                rebate_spend = _tf(_gv(row, rebate_spend_i)) if rebate_spend_i is not None else None
                 source_roi = _tf(_gv(row, roi_i))
                 gmv   = _tf(_gv(row, gmv_i))   # 24h_gmv 金额，用于所有层级聚合 ROI = Σgmv/Σcostdsp
+                rebate_roi = (gmv / rebate_spend) if (gmv is not None and rebate_spend and rebate_spend > 0) else None
                 roi = (gmv / spend) if (gmv is not None and spend > 0) else source_roi
                 dac   = _tf(_gv(row, dac_i)) or 0.0
                 dau   = _tf(_gv(row, dau_i)) or 0.0
@@ -331,7 +334,7 @@ def _load_xlsx(path):
                 all_records.append({
                     "ds": ds_raw, "name": name, "cid": cid,
                     "spend": spend, "roi": roi, "source_roi": source_roi, "gmv": gmv, "dac": dac, "dac_cost": dac_cost,
-                    "dau": dau, "geo": geo,
+                    "dau": dau, "geo": geo, "rebate_spend": rebate_spend, "rebate_roi": rebate_roi,
                 })
                 sec_parsed += 1
             except Exception as e:
@@ -396,6 +399,7 @@ def _load_numbers(path):
         name    = table.cell(r, col.get("campaign_name", 2)).value or ""
         cid     = table.cell(r, col.get("campaign_id",   1)).value or ""
         spend_v = table.cell(r, col.get("花费",          5)).value
+        rebate_spend_v = table.cell(r, col.get("costdsp返点后")).value if "costdsp返点后" in col else None
         if "sess-gmvroi" in col and "24h-gmvroi" in col:
             gmv_v = table.cell(r, col.get("24h-gmvroi")).value
             roi_v = table.cell(r, col.get("sess-gmvroi")).value
@@ -403,12 +407,14 @@ def _load_numbers(path):
             gmv_v = table.cell(r, col.get("24h_gmv",    19)).value
             roi_v = table.cell(r, col.get("24h-gmvroi", 20)).value
         spend = float(spend_v) if isinstance(spend_v, (int, float)) else 0.0
+        rebate_spend = float(rebate_spend_v) if isinstance(rebate_spend_v, (int, float)) else None
         gmv   = float(gmv_v)   if isinstance(gmv_v,   (int, float)) else None
         source_roi = float(roi_v) if isinstance(roi_v, (int, float)) else None
+        rebate_roi = (gmv / rebate_spend) if (gmv is not None and rebate_spend and rebate_spend > 0) else None
         roi   = (gmv / spend) if (gmv is not None and spend > 0) else source_roi
         dau_v = table.cell(r, col.get("session_dau", col.get("dau", 10))).value if ("session_dau" in col or "dau" in col) else 0
         dau   = float(dau_v)   if isinstance(dau_v,   (int, float)) else 0.0
-        records.append({"ds": ds, "name": name, "cid": cid, "spend": spend, "roi": roi, "source_roi": source_roi, "gmv": gmv, "dac": 0, "dac_cost": None, "dau": dau, "geo": ""})
+        records.append({"ds": ds, "name": name, "cid": cid, "spend": spend, "roi": roi, "source_roi": source_roi, "gmv": gmv, "dac": 0, "dac_cost": None, "dau": dau, "geo": "", "rebate_spend": rebate_spend, "rebate_roi": rebate_roi})
     print(f"加载 {len(records)} 行数据")
     return records
 
@@ -485,6 +491,7 @@ def _df_to_records(df, start_ds=None, end_ds=None):
     name_i      = _find_col(cm, ["campaign_name", "campaign_namedsp", "campaign name"])
     cid_i       = _find_col(cm, ["campaign_id", "campaignid", "campaign id"])
     spend_i     = _find_col(cm, ["花费", "spend", "costdsp", "cost"])
+    rebate_spend_i = _find_col(cm, ["costdsp返点后", "返点后costdsp", "返点后花费", "rebate_cost", "cost_after_rebate"])
     dau_i       = _find_col(cm, ["session_dau", "session dau", "dau"])
     dac_i       = _find_col(cm, ["24h_dac", "session_dac", "dac"])
     dac_cost_i  = _find_col(cm, ["dac成本", "dac_cost", "dac cost"])
@@ -513,14 +520,16 @@ def _df_to_records(df, start_ds=None, end_ds=None):
             cid      = _value(row, cid_i)
             geo      = _value(row, geo_i)
             spend    = _to_float(_value(row, spend_i)) or 0.0
+            rebate_spend = _to_float(_value(row, rebate_spend_i)) if rebate_spend_i is not None else None
             source_roi = _to_float(_value(row, roi_i)) if roi_i is not None else None
             gmv      = _to_float(_value(row, gmv_i)) if gmv_i is not None else None
+            rebate_roi = (gmv / rebate_spend) if (gmv is not None and rebate_spend and rebate_spend > 0) else None
             roi      = (gmv / spend) if (gmv is not None and spend > 0) else source_roi
             dac      = _to_float(_value(row, dac_i)) or 0.0
             dac_cost = _to_float(_value(row, dac_cost_i)) if dac_cost_i is not None else None
             dau      = _to_float(_value(row, dau_i)) or 0.0
             records.append({"ds": ds_raw, "name": name, "cid": cid,
-                            "spend": spend, "roi": roi, "source_roi": source_roi, "gmv": gmv, "dac": dac, "dac_cost": dac_cost, "dau": dau, "geo": geo})
+                            "spend": spend, "roi": roi, "source_roi": source_roi, "gmv": gmv, "dac": dac, "dac_cost": dac_cost, "dau": dau, "geo": geo, "rebate_spend": rebate_spend, "rebate_roi": rebate_roi})
         except (ValueError, TypeError):
             continue
     print(f"加载 {len(records)} 行数据")
@@ -778,8 +787,9 @@ def aggregate(records, dates):
     date_set    = set(dates)
     proj_agg    = defaultdict(lambda: defaultdict(lambda: {"spend":0,"gmv":0}))
     country_agg = defaultdict(lambda: defaultdict(lambda: {"spend":0,"gmv":0}))
-    camp_agg    = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: {"spend":0,"gmv":0})))
+    camp_agg    = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: {"spend":0,"gmv":0,"rebate_spend":0})))
     cid_to_short = {}
+    rebate_roi_groups = {"JBP", "欧洲本地"}
 
     for r in records:
         if r["ds"] not in date_set: continue
@@ -796,6 +806,8 @@ def aggregate(records, dates):
         cb = camp_agg[label][sn][r["ds"]]
         cb["spend"] += r["spend"]
         cb["gmv"]   += (r.get("gmv") or 0)                  # 单 campaign 同样用 Σ24h_gmv / Σcostdsp
+        if r.get("rebate_spend") and r["rebate_spend"] > 0:
+            cb["rebate_spend"] += r["rebate_spend"]
 
     def to_series(agg_dict):
         result = {}
@@ -816,13 +828,21 @@ def aggregate(records, dates):
         for group, camp_map in camp_agg.items():
             gcamps = {}
             for camp_label, ds_map in camp_map.items():
-                spend_list, roi_list = [], []
+                spend_list, roi_list, rebate_roi_list = [], [], []
                 for d in dates:
-                    b = ds_map.get(d, {"spend":0,"gmv":0})
+                    b = ds_map.get(d, {"spend":0,"gmv":0,"rebate_spend":0})
                     spend_list.append(round(b["spend"], 2))
                     roi_list.append(round(b["gmv"]/b["spend"], 2) if b["spend"] > 0 else None)
+                    rebate_roi_list.append(
+                        round(b["gmv"]/b["rebate_spend"], 2)
+                        if group in rebate_roi_groups and b.get("rebate_spend", 0) > 0
+                        else None
+                    )
                 if sum(s for s in spend_list if s) > 0:
-                    gcamps[camp_label] = {"spend": spend_list, "roi": roi_list}
+                    data = {"spend": spend_list, "roi": roi_list}
+                    if any(v is not None for v in rebate_roi_list):
+                        data["rebate_roi"] = rebate_roi_list
+                    gcamps[camp_label] = data
             if gcamps:
                 result[group] = gcamps
         return result
@@ -1061,10 +1081,13 @@ def build_data(records):
                 bars.append({"label":lbl,"data":d["spend"],"backgroundColor":bc,
                              "borderColor":lc,"borderWidth":1,"yAxisID":"ySpend",
                              "type":"bar","stack":"spend"})
-                lines.append({"label":lbl,"data":d["roi"],"borderColor":lc,
+                line_ds = {"label":lbl,"data":d["roi"],"borderColor":lc,
                               "backgroundColor":"transparent","borderWidth":2.5,
                               "pointRadius":4,"pointHoverRadius":6,"tension":0.3,
-                              "yAxisID":"yROI","type":"line","spanGaps":True})
+                              "yAxisID":"yROI","type":"line","spanGaps":True}
+                if d.get("rebate_roi"):
+                    line_ds["rebateRoi"] = d["rebate_roi"]
+                lines.append(line_ds)
             return bars + lines
 
         def summ(series):
@@ -1547,7 +1570,11 @@ function fmtDauCost(v) {{
 }}
 
 function sliceDataset(ds, s, e) {{
-  return {{...ds, data: sliceArr(ds.data, s, e)}};
+  return {{
+    ...ds,
+    data: sliceArr(ds.data, s, e),
+    rebateRoi: ds.rebateRoi ? sliceArr(ds.rebateRoi, s, e) : ds.rebateRoi,
+  }};
 }}
 
 function sliceSeriesMap(seriesMap, s, e) {{
@@ -1747,15 +1774,20 @@ function makeChart(id, datasets, labels, existing, opts) {{
           callbacks:{{label:ctx=>{{
             const v=ctx.parsed.y;
             if(v===null||v===undefined) return null;
+            const rr = ctx.dataset.rebateRoi ? ctx.dataset.rebateRoi[ctx.dataIndex] : null;
             return ctx.dataset.yAxisID==="ySpend"
               ? ctx.dataset.label+": $"+v.toLocaleString()
-              : ctx.dataset.label+" ROI: "+v+"x";
+              : rr != null
+                ? ctx.dataset.label+" ROI: "+v+"x · 返后ROI: "+rr+"x"
+                : ctx.dataset.label+" ROI: "+v+"x";
           }}}}}},
         datalabels:{{
           display: ctx => SHOW_DL && ctx.dataset.yAxisID === "yROI",
           formatter: (v, ctx) => {{
             const val = ctx.dataset.data[ctx.dataIndex];
-            return val != null ? val + "x" : null;
+            const rr = ctx.dataset.rebateRoi ? ctx.dataset.rebateRoi[ctx.dataIndex] : null;
+            if (val == null) return null;
+            return rr != null ? val + "x\\n返后 " + rr + "x" : val + "x";
           }},
           color: ctx => ctx.dataset.borderColor || "#333",
           font: {{ size:11, weight:"700" }},
@@ -1979,7 +2011,7 @@ function renderCampaign() {{
     <div class="chart-hd">${{selGroup}} — Campaign ${{metricTxt}}
       <span class="badge">${{axisTxt}} · 图例可点击隐藏</span></div>
     <canvas id="campChart"></canvas>
-    <div class="note">图例可点击隐藏/显示单个 Campaign；ROI 线带数值</div>
+    <div class="note">图例可点击隐藏/显示单个 Campaign；JBP、欧洲本地会同时显示 ROI 和返后ROI</div>
   </div>`;
   campChart=makeChart("campChart",ds,d.labels,null,
     {{spendAxis:showSpend, roiAxis:showRoi, dataLabels:showRoi}});
