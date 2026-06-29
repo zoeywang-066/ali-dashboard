@@ -94,7 +94,7 @@ def load_data():
 # 已知表头关键词集合（用于数据行污染检测）
 HEADER_KEYWORDS = {
     "ds", "统计时间", "campaign_name", "campaign_namedsp", "campaign_id",
-    "花费", "cost", "costdsp", "24h_dac", "session_dac", "session_dau", "dac成本",
+    "花费", "cost", "costdsp", "costdsp返点后", "24h_dac", "session_dac", "session_dau", "dac成本",
     "24h-gmvroi", "24h_gmvroi", "sess-gmvroi",
 }
 
@@ -321,17 +321,16 @@ def _load_xlsx(path):
                 cid   = _gv(row, cid_i) or ""
                 geo   = _gv(row, geo_i) or ""
                 spend = _tf(spend_raw) or 0.0
-                roi   = _tf(_gv(row, roi_i))
-                gmv   = _tf(_gv(row, gmv_i))   # 24h_gmv 金额，用于项目/国家聚合 ROI = Σgmv/Σ花费
-                if roi is None and gmv is not None and spend > 0:
-                    roi = gmv / spend
+                source_roi = _tf(_gv(row, roi_i))
+                gmv   = _tf(_gv(row, gmv_i))   # 24h_gmv 金额，用于所有层级聚合 ROI = Σgmv/Σcostdsp
+                roi = (gmv / spend) if (gmv is not None and spend > 0) else source_roi
                 dac   = _tf(_gv(row, dac_i)) or 0.0
                 dau   = _tf(_gv(row, dau_i)) or 0.0
                 # dac成本：新格式直接读取；旧格式留 None（由 build_dac_data 按汇总计算）
                 dac_cost = _tf(_gv(row, dac_cost_i)) if dac_cost_i is not None else None
                 all_records.append({
                     "ds": ds_raw, "name": name, "cid": cid,
-                    "spend": spend, "roi": roi, "gmv": gmv, "dac": dac, "dac_cost": dac_cost,
+                    "spend": spend, "roi": roi, "source_roi": source_roi, "gmv": gmv, "dac": dac, "dac_cost": dac_cost,
                     "dau": dau, "geo": geo,
                 })
                 sec_parsed += 1
@@ -405,12 +404,11 @@ def _load_numbers(path):
             roi_v = table.cell(r, col.get("24h-gmvroi", 20)).value
         spend = float(spend_v) if isinstance(spend_v, (int, float)) else 0.0
         gmv   = float(gmv_v)   if isinstance(gmv_v,   (int, float)) else None
-        roi   = float(roi_v)   if isinstance(roi_v,   (int, float)) else None
-        if roi is None and gmv is not None and spend > 0:
-            roi = gmv / spend
+        source_roi = float(roi_v) if isinstance(roi_v, (int, float)) else None
+        roi   = (gmv / spend) if (gmv is not None and spend > 0) else source_roi
         dau_v = table.cell(r, col.get("session_dau", col.get("dau", 10))).value if ("session_dau" in col or "dau" in col) else 0
         dau   = float(dau_v)   if isinstance(dau_v,   (int, float)) else 0.0
-        records.append({"ds": ds, "name": name, "cid": cid, "spend": spend, "roi": roi, "gmv": gmv, "dac": 0, "dac_cost": None, "dau": dau, "geo": ""})
+        records.append({"ds": ds, "name": name, "cid": cid, "spend": spend, "roi": roi, "source_roi": source_roi, "gmv": gmv, "dac": 0, "dac_cost": None, "dau": dau, "geo": ""})
     print(f"加载 {len(records)} 行数据")
     return records
 
@@ -515,15 +513,14 @@ def _df_to_records(df, start_ds=None, end_ds=None):
             cid      = _value(row, cid_i)
             geo      = _value(row, geo_i)
             spend    = _to_float(_value(row, spend_i)) or 0.0
-            roi      = _to_float(_value(row, roi_i)) if roi_i is not None else None
+            source_roi = _to_float(_value(row, roi_i)) if roi_i is not None else None
             gmv      = _to_float(_value(row, gmv_i)) if gmv_i is not None else None
-            if roi is None and gmv is not None and spend > 0:
-                roi = gmv / spend
+            roi      = (gmv / spend) if (gmv is not None and spend > 0) else source_roi
             dac      = _to_float(_value(row, dac_i)) or 0.0
             dac_cost = _to_float(_value(row, dac_cost_i)) if dac_cost_i is not None else None
             dau      = _to_float(_value(row, dau_i)) or 0.0
             records.append({"ds": ds_raw, "name": name, "cid": cid,
-                            "spend": spend, "roi": roi, "gmv": gmv, "dac": dac, "dac_cost": dac_cost, "dau": dau, "geo": geo})
+                            "spend": spend, "roi": roi, "source_roi": source_roi, "gmv": gmv, "dac": dac, "dac_cost": dac_cost, "dau": dau, "geo": geo})
         except (ValueError, TypeError):
             continue
     print(f"加载 {len(records)} 行数据")
