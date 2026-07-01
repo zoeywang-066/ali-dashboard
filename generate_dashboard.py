@@ -791,6 +791,13 @@ def aggregate(records, dates):
     cid_to_short = {}
     rebate_roi_groups = {"JBP", "欧洲本地"}
 
+    def rebate_roi_applicable(group, ds):
+        if group == "JBP":
+            return True
+        if group == "欧洲本地":
+            return str(ds) < "20260701"
+        return False
+
     for r in records:
         if r["ds"] not in date_set: continue
         kind, label = classify(r["name"], r.get("geo"))
@@ -835,7 +842,7 @@ def aggregate(records, dates):
                     roi_list.append(round(b["gmv"]/b["spend"], 2) if b["spend"] > 0 else None)
                     rebate_roi_list.append(
                         round(b["gmv"]/b["rebate_spend"], 2)
-                        if group in rebate_roi_groups and b.get("rebate_spend", 0) > 0
+                        if rebate_roi_applicable(group, d) and b.get("rebate_spend", 0) > 0
                         else None
                     )
                 if sum(s for s in spend_list if s) > 0:
@@ -2011,7 +2018,7 @@ function renderCampaign() {{
     <div class="chart-hd">${{selGroup}} — Campaign ${{metricTxt}}
       <span class="badge">${{axisTxt}} · 图例可点击隐藏</span></div>
     <canvas id="campChart"></canvas>
-    <div class="note">图例可点击隐藏/显示单个 Campaign；JBP、欧洲本地会同时显示 ROI 和返后ROI</div>
+    <div class="note">图例可点击隐藏/显示单个 Campaign；JBP 会显示返后ROI，欧洲本地仅 2026-07-01 前显示返后ROI</div>
   </div>`;
   campChart=makeChart("campChart",ds,d.labels,null,
     {{spendAxis:showSpend, roiAxis:showRoi, dataLabels:showRoi}});
