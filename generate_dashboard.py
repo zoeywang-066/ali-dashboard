@@ -1754,6 +1754,31 @@ function getFilteredDauCostData() {{
 }}
 
 // ── Chart factory ────────────────────────────────────────────────────────────
+function isWeekendDs(ds) {{
+  const s = String(ds || "");
+  if (s.length !== 8) return false;
+  const d = new Date(Number(s.slice(0,4)), Number(s.slice(4,6)) - 1, Number(s.slice(6,8)));
+  const day = d.getDay();
+  return day === 0 || day === 6;
+}}
+function weekendTickFont(ctx) {{
+  const idx = ctx && typeof ctx.index === "number" ? ctx.index : -1;
+  const ds = ctx && ctx.chart && ctx.chart.data && ctx.chart.data.dates
+    ? ctx.chart.data.dates[idx]
+    : null;
+  return {{size:12, weight:isWeekendDs(ds) ? "700" : "400"}};
+}}
+function weekendTickColor(ctx) {{
+  const idx = ctx && typeof ctx.index === "number" ? ctx.index : -1;
+  const ds = ctx && ctx.chart && ctx.chart.data && ctx.chart.data.dates
+    ? ctx.chart.data.dates[idx]
+    : null;
+  return isWeekendDs(ds) ? "#111827" : "#64748b";
+}}
+function weekendXAxis() {{
+  return {{grid:{{color:"rgba(0,0,0,.05)"}},ticks:{{font:weekendTickFont,color:weekendTickColor}}}};
+}}
+
 function makeChart(id, datasets, labels, existing, opts) {{
   if (existing) existing.destroy();
   opts = opts || {{}};
@@ -1761,11 +1786,11 @@ function makeChart(id, datasets, labels, existing, opts) {{
   const SHOW_ROI   = opts.roiAxis    !== false;
   const SHOW_DL    = opts.dataLabels !== false;
   return new Chart(document.getElementById(id), {{
-    type:"bar", data:{{labels,datasets}},
+    type:"bar", data:{{labels,datasets,dates:opts.dates||[]}},
     options:{{
       responsive:true, interaction:{{mode:"index",intersect:false}},
       scales:{{
-        x:{{grid:{{color:"rgba(0,0,0,.05)"}},ticks:{{font:{{size:12}}}}}},
+        x:weekendXAxis(),
         ySpend:{{type:"linear",position:"left",display:SHOW_SPEND,
           title:{{display:true,text:"消耗 (USD)",font:{{size:12}}}},
           grid:{{color:"rgba(0,0,0,.06)"}},
@@ -1855,7 +1880,7 @@ function renderHome() {{
 
 function renderPlatformTrend(d) {{
   if (!d.platform || !d.platform.ds) return;
-  platformChart = makeChart("platformRoiChart", d.platform.ds, d.labels, platformChart);
+  platformChart = makeChart("platformRoiChart", d.platform.ds, d.labels, platformChart, {{dates:d.dates}});
 }}
 
 function renderSignals() {{
@@ -1934,11 +1959,11 @@ function renderProject() {{
     ];
     if (titleEl) titleEl.innerHTML=`${{selProject}} 日消耗（柱）& ROI（线）<span class="badge">左轴: 消耗 USD · 右轴: ROI</span>`;
     document.getElementById("clear-project").style.display="inline";
-    projChart = makeChart("projChart", ds, d.labels, projChart);
+    projChart = makeChart("projChart", ds, d.labels, projChart, {{dates:d.dates}});
   }} else {{
     if (titleEl) titleEl.innerHTML=`项目日消耗（柱）& ROI（线）<span class="badge">左轴: 消耗 USD · 右轴: ROI</span>`;
     document.getElementById("clear-project").style.display="none";
-    projChart = makeChart("projChart", d.proj_ds, d.labels, projChart);
+    projChart = makeChart("projChart", d.proj_ds, d.labels, projChart, {{dates:d.dates}});
   }}
 }}
 
@@ -1972,14 +1997,14 @@ function renderCountry() {{
     ];
     document.getElementById("country-chart-title").innerHTML=
       `${{selCountry}} 日消耗（柱）& ROI（线）<span class="badge">左轴: 消耗 USD · 右轴: ROI</span>`;
-    countryChart=makeChart("countryChart",ds,d.labels,countryChart);
+    countryChart=makeChart("countryChart",ds,d.labels,countryChart,{{dates:d.dates}});
     document.getElementById("clear-country").style.display="inline";
     document.getElementById("proj-ref-box").style.display="block";
-    projRefChart=makeChart("projRefChart",d.proj_ds,d.labels,projRefChart);
+    projRefChart=makeChart("projRefChart",d.proj_ds,d.labels,projRefChart,{{dates:d.dates}});
   }} else {{
     document.getElementById("country-chart-title").innerHTML=
       `国家日消耗（柱堆叠）& ROI（线）<span class="badge">左轴: 消耗 USD · 右轴: ROI</span>`;
-    countryChart=makeChart("countryChart",d.country_ds,d.labels,countryChart);
+    countryChart=makeChart("countryChart",d.country_ds,d.labels,countryChart,{{dates:d.dates}});
     document.getElementById("clear-country").style.display="none";
     document.getElementById("proj-ref-box").style.display="none";
   }}
@@ -2021,7 +2046,7 @@ function renderCampaign() {{
     <div class="note">图例可点击隐藏/显示单个 Campaign；JBP 会显示返后ROI，欧洲本地仅 2026-07-01 前显示返后ROI</div>
   </div>`;
   campChart=makeChart("campChart",ds,d.labels,null,
-    {{spendAxis:showSpend, roiAxis:showRoi, dataLabels:showRoi}});
+    {{spendAxis:showSpend, roiAxis:showRoi, dataLabels:showRoi, dates:d.dates}});
 }}
 
 function makeChip(lbl,s,isProj) {{
@@ -2116,7 +2141,7 @@ function renderDauCost() {{
   if (dauTrendChart) dauTrendChart.destroy();
   dauTrendChart = new Chart(document.getElementById('dauTrendChart'), {{
     type: 'line',
-    data: {{ labels, datasets: [{{
+    data: {{ labels, dates: d.dates || [], datasets: [{{
       label: selDauCountry + ' DAU成本',
       data: cData,
       borderColor: '#0ea5e9',
@@ -2129,7 +2154,7 @@ function renderDauCost() {{
       responsive: true,
       interaction: {{ mode: 'index', intersect: false }},
       scales: {{
-        x: {{ grid: {{ color: 'rgba(0,0,0,.05)' }}, ticks: {{ font: {{ size: 12 }} }} }},
+        x: weekendXAxis(),
         y: {{
           title: {{ display: true, text: 'DAU成本 (USD)', font: {{ size: 12 }} }},
           ticks: {{ callback: v => fmtDauCost(v), font: {{ size: 11 }} }}, min: 0,
@@ -2164,12 +2189,12 @@ function renderDauCost() {{
   if (dauCampChart) dauCampChart.destroy();
   dauCampChart = new Chart(document.getElementById('dauCampChart'), {{
     type: 'line',
-    data: {{ labels, datasets: campDs }},
+    data: {{ labels, dates: d.dates || [], datasets: campDs }},
     options: {{
       responsive: true,
       interaction: {{ mode: 'index', intersect: false }},
       scales: {{
-        x: {{ grid: {{ color: 'rgba(0,0,0,.05)' }}, ticks: {{ font: {{ size: 12 }} }} }},
+        x: weekendXAxis(),
         y: {{
           title: {{ display: true, text: 'DAU成本 (USD)', font: {{ size: 12 }} }},
           ticks: {{ callback: v => fmtDauCost(v), font: {{ size: 11 }} }}, min: 0,
@@ -2270,7 +2295,7 @@ function renderDac() {{
   if (dacTrendChart) dacTrendChart.destroy();
   dacTrendChart = new Chart(document.getElementById('dacTrendChart'), {{
     type: 'line',
-    data: {{ labels, datasets: [{{
+    data: {{ labels, dates: d.dates || [], datasets: [{{
       label: selDacCountry + ' DAC成本',
       data: cData,
       borderColor: '#4f46e5',
@@ -2283,7 +2308,7 @@ function renderDac() {{
       responsive: true,
       interaction: {{ mode: 'index', intersect: false }},
       scales: {{
-        x: {{ grid: {{ color: 'rgba(0,0,0,.05)' }}, ticks: {{ font: {{ size: 12 }} }} }},
+        x: weekendXAxis(),
         y: {{
           title: {{ display: true, text: 'DAC成本 (USD)', font: {{ size: 12 }} }},
           ticks: {{ callback: v => '$' + v, font: {{ size: 11 }} }}, min: 0,
@@ -2319,12 +2344,12 @@ function renderDac() {{
   if (dacCampChart) dacCampChart.destroy();
   dacCampChart = new Chart(document.getElementById('dacCampChart'), {{
     type: 'line',
-    data: {{ labels, datasets: campDs }},
+    data: {{ labels, dates: d.dates || [], datasets: campDs }},
     options: {{
       responsive: true,
       interaction: {{ mode: 'index', intersect: false }},
       scales: {{
-        x: {{ grid: {{ color: 'rgba(0,0,0,.05)' }}, ticks: {{ font: {{ size: 12 }} }} }},
+        x: weekendXAxis(),
         y: {{
           title: {{ display: true, text: 'DAC成本 (USD)', font: {{ size: 12 }} }},
           ticks: {{ callback: v => '$' + v, font: {{ size: 11 }} }}, min: 0,
@@ -2440,7 +2465,7 @@ function renderDacSpecial() {{
   if (dacSpecSpendChart) dacSpecSpendChart.destroy();
   dacSpecSpendChart = new Chart(document.getElementById('dacSpecSpendChart'), {{
     type: 'bar',
-    data: {{ labels, datasets: [
+    data: {{ labels, dates: d.dates || [], datasets: [
       {{label:'花费', data: target.spend_series, backgroundColor:'rgba(79,70,229,0.7)',
         borderColor:'#4f46e5', borderWidth:1, yAxisID:'ySpend', type:'bar'}},
       {{label:'DAC 数', data: target.dac_series, borderColor:'#f59e0b',
@@ -2450,7 +2475,7 @@ function renderDacSpecial() {{
     options: {{
       responsive:true, interaction:{{mode:'index',intersect:false}},
       scales:{{
-        x:{{grid:{{color:'rgba(0,0,0,.05)'}},ticks:{{font:{{size:12}}}}}},
+        x:weekendXAxis(),
         ySpend:{{type:'linear',position:'left',
           title:{{display:true,text:'花费 (USD)',font:{{size:12}}}},
           grid:{{color:'rgba(0,0,0,.06)'}},
@@ -2478,7 +2503,7 @@ function renderDacSpecial() {{
   if (dacSpecRoiChart) dacSpecRoiChart.destroy();
   dacSpecRoiChart = new Chart(document.getElementById('dacSpecRoiChart'), {{
     type: 'bar',
-    data: {{ labels, datasets: [
+    data: {{ labels, dates: d.dates || [], datasets: [
       {{label:'24H GMV', data: target.gmv_series || [], backgroundColor:'rgba(14,165,233,0.58)',
         borderColor:'#0ea5e9', borderWidth:1, yAxisID:'yGmv', type:'bar'}},
       {{label:'ROI', data: target.roi_series || [], borderColor:'#059669',
@@ -2488,7 +2513,7 @@ function renderDacSpecial() {{
     options: {{
       responsive:true, interaction:{{mode:'index',intersect:false}},
       scales:{{
-        x:{{grid:{{color:'rgba(0,0,0,.05)'}},ticks:{{font:{{size:12}}}}}},
+        x:weekendXAxis(),
         yGmv:{{type:'linear',position:'left',
           title:{{display:true,text:'24H GMV (USD)',font:{{size:12}}}},
           grid:{{color:'rgba(0,0,0,.06)'}},
@@ -2521,7 +2546,7 @@ function renderDacSpecial() {{
   if (dacSpecCostChart) dacSpecCostChart.destroy();
   dacSpecCostChart = new Chart(document.getElementById('dacSpecCostChart'), {{
     type: 'line',
-    data: {{ labels, datasets: [{{
+    data: {{ labels, dates: d.dates || [], datasets: [{{
       label: 'DAC 成本', data: target.cost_series,
       borderColor:'#4f46e5', backgroundColor:'rgba(79,70,229,0.07)', fill:true,
       borderWidth:2.5, pointRadius:5, pointHoverRadius:7, tension:0.3, spanGaps:true,
@@ -2529,7 +2554,7 @@ function renderDacSpecial() {{
     options: {{
       responsive:true, interaction:{{mode:'index',intersect:false}},
       scales:{{
-        x:{{grid:{{color:'rgba(0,0,0,.05)'}},ticks:{{font:{{size:12}}}}}},
+        x:weekendXAxis(),
         y:{{title:{{display:true,text:'DAC 成本 (USD)',font:{{size:12}}}},
           ticks:{{callback:v=>'$'+v,font:{{size:11}}}}, min:0}},
       }},
