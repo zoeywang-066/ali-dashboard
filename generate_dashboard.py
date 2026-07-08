@@ -1303,7 +1303,6 @@ canvas{{max-height:340px}}
   <div class="tab active" onclick="switchTab('home')">首页</div>
   <div class="tab" onclick="switchTab('project')">项目视图</div>
   <div class="tab" onclick="switchTab('country')">国家视图</div>
-  <div class="tab" onclick="switchTab('campaign')">Campaign 视图</div>
   <div class="tab" onclick="switchTab('dau')">DAU成本</div>
   <div class="tab" onclick="switchTab('dac')">DAC成本</div>
   <div class="period-bar">
@@ -1363,6 +1362,21 @@ canvas{{max-height:340px}}
     <canvas id="projChart"></canvas>
     <div class="note">点击项目卡片单独查看；再次点击或点 ✕ 取消筛选</div>
   </div>
+  <div class="section-title">
+    项目内 Campaign 趋势
+  </div>
+  <div class="view-controls">
+    <div class="ctrl-grp"><span class="ctrl-lbl">指标</span>
+      <div class="seg camp-metric" id="project-camp-metric">
+        <button data-metric="both" onclick="setCampMetric('both')">消耗+ROI</button>
+        <button data-metric="spend" onclick="setCampMetric('spend')">消耗</button>
+        <button data-metric="roi" onclick="setCampMetric('roi')">ROI</button>
+      </div>
+    </div>
+  </div>
+  <div id="project-camp-chart-area">
+    <div class="empty-hint">👆 点击上方项目卡片，查看该项目下的 Campaign 趋势</div>
+  </div>
 </div>
 
 <!-- ══ 国家面板 ══ -->
@@ -1377,30 +1391,20 @@ canvas{{max-height:340px}}
     <canvas id="countryChart"></canvas>
     <div class="note">点击国家卡片单独查看；再次点击或点 ✕ 取消筛选</div>
   </div>
-  <div id="proj-ref-box" class="chart-box" style="display:none">
-    <div class="chart-hd">项目整体趋势（参考）<span class="badge">同期</span></div>
-    <canvas id="projRefChart"></canvas>
-  </div>
-</div>
-
-<!-- ══ Campaign 面板 ══ -->
-<div id="panel-campaign" class="panel">
   <div class="section-title">
-    选择国家 / 项目
-    <span id="clear-camp" class="clear-btn" style="display:none" onclick="selectGroup(null)">✕ 清除</span>
+    国家内 Campaign 趋势
   </div>
   <div class="view-controls">
     <div class="ctrl-grp"><span class="ctrl-lbl">指标</span>
-      <div class="seg" id="camp-metric">
+      <div class="seg camp-metric" id="country-camp-metric">
         <button data-metric="both" onclick="setCampMetric('both')">消耗+ROI</button>
         <button data-metric="spend" onclick="setCampMetric('spend')">消耗</button>
         <button data-metric="roi" onclick="setCampMetric('roi')">ROI</button>
       </div>
     </div>
   </div>
-  <div id="group-chips" class="group-chips"></div>
-  <div id="camp-chart-area">
-    <div class="empty-hint">👆 选择上方某个国家或项目，查看其全部 Campaign 趋势</div>
+  <div id="country-camp-chart-area">
+    <div class="empty-hint">👆 点击上方国家卡片，查看该国家下的 Campaign 趋势</div>
   </div>
 </div>
 
@@ -1463,13 +1467,12 @@ let dacPeriod      = 3;
 let activeTab      = "home";
 let selProject     = null;
 let selCountry     = null;
-let selGroup       = null;
 let campMetric     = "both";
 let selDauCountry  = null;
 let selDacCountry  = null;
 let selDacSpecial  = null;
 
-let platformChart=null, projChart=null, countryChart=null, projRefChart=null, campChart=null;
+let platformChart=null, projChart=null, countryChart=null, projectCampChart=null, countryCampChart=null;
 let dauTrendChart=null, dauCampChart=null;
 let dacTrendChart=null, dacCampChart=null;
 let dacSpecSpendChart=null, dacSpecCostChart=null, dacSpecRoiChart=null;
@@ -1965,6 +1968,7 @@ function renderProject() {{
     document.getElementById("clear-project").style.display="none";
     projChart = makeChart("projChart", d.proj_ds, d.labels, projChart, {{dates:d.dates}});
   }}
+  renderCampaignForGroup(selProject, "project-camp-chart-area", "project", "点击上方项目卡片，查看该项目下的 Campaign 趋势");
 }}
 
 // ── 国家面板 ────────────────────────────────────────────────────────────────
@@ -1999,64 +2003,65 @@ function renderCountry() {{
       `${{selCountry}} 日消耗（柱）& ROI（线）<span class="badge">左轴: 消耗 USD · 右轴: ROI</span>`;
     countryChart=makeChart("countryChart",ds,d.labels,countryChart,{{dates:d.dates}});
     document.getElementById("clear-country").style.display="inline";
-    document.getElementById("proj-ref-box").style.display="block";
-    projRefChart=makeChart("projRefChart",d.proj_ds,d.labels,projRefChart,{{dates:d.dates}});
   }} else {{
     document.getElementById("country-chart-title").innerHTML=
       `国家日消耗（柱堆叠）& ROI（线）<span class="badge">左轴: 消耗 USD · 右轴: ROI</span>`;
     countryChart=makeChart("countryChart",d.country_ds,d.labels,countryChart,{{dates:d.dates}});
     document.getElementById("clear-country").style.display="none";
-    document.getElementById("proj-ref-box").style.display="none";
   }}
+  renderCampaignForGroup(selCountry, "country-camp-chart-area", "country", "点击上方国家卡片，查看该国家下的 Campaign 趋势");
 }}
 
-// ── Campaign 面板 ────────────────────────────────────────────────────────────
-function renderCampaign() {{
-  const d=getFilteredData();
-  const chips=document.getElementById("group-chips");
-  chips.innerHTML="";
-  Object.keys(d.proj_summary).sort().forEach(lbl=>chips.appendChild(makeChip(lbl,d.proj_summary[lbl],true)));
-  Object.entries(d.country_summary).sort((a,b)=>(b[1].spend||0)-(a[1].spend||0))
-    .forEach(([lbl,s])=>chips.appendChild(makeChip(lbl,s,false)));
-
-  document.querySelectorAll("#camp-metric button").forEach(b=>
+// ── 分 Campaign 趋势 ────────────────────────────────────────────────────────
+function syncCampMetricButtons() {{
+  document.querySelectorAll(".camp-metric button").forEach(b=>
     b.classList.toggle("active", b.dataset.metric===campMetric));
+}}
 
-  const area=document.getElementById("camp-chart-area");
-  if (!selGroup || !d.camp_ds[selGroup]) {{
-    area.innerHTML=`<div class="empty-hint">👆 选择上方某个国家或项目，查看其全部 Campaign 趋势</div>`;
-    campChart=null;
-    document.getElementById("clear-camp").style.display="none";
+function getCampChart(scope) {{
+  return scope === "project" ? projectCampChart : countryCampChart;
+}}
+
+function setCampChart(scope, chart) {{
+  if (scope === "project") projectCampChart = chart;
+  else countryCampChart = chart;
+}}
+
+function clearCampChart(scope) {{
+  const chart = getCampChart(scope);
+  if (chart) chart.destroy();
+  setCampChart(scope, null);
+}}
+
+function renderCampaignForGroup(group, areaId, scope, emptyText) {{
+  const d=getFilteredData();
+  syncCampMetricButtons();
+
+  const area=document.getElementById(areaId);
+  if (!area) return;
+  if (!group || !d.camp_ds[group]) {{
+    area.innerHTML=`<div class="empty-hint">👆 ${{emptyText}}</div>`;
+    clearCampChart(scope);
     return;
   }}
-  document.getElementById("clear-camp").style.display="inline";
 
   const showSpend = campMetric !== "roi";
   const showRoi   = campMetric !== "spend";
-  const ds = d.camp_ds[selGroup].filter(x =>
+  const ds = d.camp_ds[group].filter(x =>
     (x.yAxisID==="ySpend" && showSpend) || (x.yAxisID==="yROI" && showRoi));
   const metricTxt = campMetric==="both" ? "日消耗（柱）& ROI（线）"
                   : campMetric==="spend" ? "日消耗（柱）" : "日 ROI（线）";
   const axisTxt = campMetric==="both" ? "左轴: 消耗 USD · 右轴: ROI"
                 : campMetric==="spend" ? "左轴: 消耗 USD" : "右轴: ROI";
+  const canvasId = scope === "project" ? "projectCampChart" : "countryCampChart";
   area.innerHTML=`<div class="chart-box">
-    <div class="chart-hd">${{selGroup}} — Campaign ${{metricTxt}}
+    <div class="chart-hd">${{group}} — Campaign ${{metricTxt}}
       <span class="badge">${{axisTxt}} · 图例可点击隐藏</span></div>
-    <canvas id="campChart"></canvas>
+    <canvas id="${{canvasId}}"></canvas>
     <div class="note">图例可点击隐藏/显示单个 Campaign；JBP 会显示返后ROI，欧洲本地仅 2026-07-01 前显示返后ROI</div>
   </div>`;
-  campChart=makeChart("campChart",ds,d.labels,null,
-    {{spendAxis:showSpend, roiAxis:showRoi, dataLabels:showRoi, dates:d.dates}});
-}}
-
-function makeChip(lbl,s,isProj) {{
-  const chip=document.createElement("div");
-  chip.className="chip"+(isProj?" proj":"")+(selGroup===lbl?" selected":"");
-  const spend=(s.spend||0)>0?"  $"+(s.spend||0).toLocaleString():"";
-  chip.innerHTML=`<strong>${{lbl}}</strong>${{spend}}`;
-  chip.title=`均 ROI: ${{s.roi!=null?s.roi+"x":"-"}}`;
-  chip.onclick=()=>selectGroup(lbl===selGroup?null:lbl);
-  return chip;
+  setCampChart(scope, makeChart(canvasId,ds,d.labels,getCampChart(scope),
+    {{spendAxis:showSpend, roiAxis:showRoi, dataLabels:showRoi, dates:d.dates}}));
 }}
 
 // ── DAU成本 面板 ─────────────────────────────────────────────────────────────
@@ -2574,12 +2579,16 @@ function renderDacSpecial() {{
 // ── 交互 ────────────────────────────────────────────────────────────────────
 function selectProject(p){{selProject=p;renderProject();}}
 function selectCountry(c){{selCountry=c;renderCountry();}}
-function selectGroup(g){{selGroup=g;renderCampaign();}}
-function setCampMetric(m){{campMetric=m;renderCampaign();}}
+function setCampMetric(m){{
+  campMetric=m;
+  syncCampMetricButtons();
+  if (activeTab === "project") renderCampaignForGroup(selProject, "project-camp-chart-area", "project", "点击上方项目卡片，查看该项目下的 Campaign 趋势");
+  if (activeTab === "country") renderCampaignForGroup(selCountry, "country-camp-chart-area", "country", "点击上方国家卡片，查看该国家下的 Campaign 趋势");
+}}
 
 function switchTab(name){{
   activeTab=name;
-  const names=["home","project","country","campaign","dau","dac"];
+  const names=["home","project","country","dau","dac"];
   document.querySelectorAll(".tab").forEach((t,i)=>t.classList.toggle("active",names[i]===name));
   document.querySelectorAll(".panel").forEach(p=>p.classList.remove("active"));
   document.getElementById("panel-"+name).classList.add("active");
@@ -2587,7 +2596,6 @@ function switchTab(name){{
   if(name==="home") renderHome();
   else if(name==="project") renderProject();
   else if(name==="country") renderCountry();
-  else if(name==="campaign") renderCampaign();
   else if(name==="dau") renderDauCost();
   else if(name==="dac") renderDac();
 }}
@@ -2596,7 +2604,6 @@ function renderAll(){{
   renderHome();
   renderProject();
   renderCountry();
-  renderCampaign();
 }}
 
 // 默认进入过去 14 天；日期控件可扩展到最新 sheet 的最早日期
