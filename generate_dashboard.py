@@ -788,7 +788,7 @@ def aggregate(records, dates):
     proj_agg    = defaultdict(lambda: defaultdict(lambda: {"spend":0,"gmv":0}))
     country_agg = defaultdict(lambda: defaultdict(lambda: {"spend":0,"gmv":0}))
     camp_agg    = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: {"spend":0,"gmv":0,"rebate_spend":0})))
-    cid_to_short = {}
+    camp_display_names = {}
     rebate_roi_groups = {"JBP", "欧洲本地"}
 
     def rebate_roi_applicable(group, ds):
@@ -798,7 +798,7 @@ def aggregate(records, dates):
             return str(ds) < "20260701"
         return False
 
-    for r in records:
+    for row_i, r in enumerate(records):
         if r["ds"] not in date_set: continue
         kind, label = classify(r["name"], r.get("geo"))
         target = proj_agg[label] if kind == "project" else country_agg[label]
@@ -806,11 +806,14 @@ def aggregate(records, dates):
         b["spend"] += r["spend"]
         b["gmv"]   += (r.get("gmv") or 0)          # 项目/国家聚合 ROI = Σ24h_gmv / Σ花费
         cid = str(r.get("cid") or "").strip()
-        if cid:
-            sn = cid_to_short.setdefault((kind, label, cid), short_name(r["name"]))
-        else:
-            sn = short_name(r["name"])
-        cb = camp_agg[label][sn][r["ds"]]
+        sn = short_name(r["name"]) or cid or "未知 campaign"
+        camp_key = f"cid:{cid}" if cid else f"name:{sn}"
+        display_key = (label, camp_key)
+        prev_display = camp_display_names.get(display_key)
+        # 同一 campaign ID 名称变化时，用当前日期窗口内最新日期/最新行的名称展示。
+        if prev_display is None or (str(r["ds"]), row_i) >= (prev_display["ds"], prev_display["row_i"]):
+            camp_display_names[display_key] = {"ds": str(r["ds"]), "row_i": row_i, "name": sn}
+        cb = camp_agg[label][camp_key][r["ds"]]
         cb["spend"] += r["spend"]
         cb["gmv"]   += (r.get("gmv") or 0)                  # 单 campaign 同样用 Σ24h_gmv / Σcostdsp
         if r.get("rebate_spend") and r["rebate_spend"] > 0:
@@ -834,7 +837,8 @@ def aggregate(records, dates):
         result = {}
         for group, camp_map in camp_agg.items():
             gcamps = {}
-            for camp_label, ds_map in camp_map.items():
+            used_labels = set()
+            for camp_key, ds_map in camp_map.items():
                 spend_list, roi_list, rebate_roi_list = [], [], []
                 for d in dates:
                     b = ds_map.get(d, {"spend":0,"gmv":0,"rebate_spend":0})
@@ -846,6 +850,11 @@ def aggregate(records, dates):
                         else None
                     )
                 if sum(s for s in spend_list if s) > 0:
+                    camp_label = camp_display_names.get((group, camp_key), {}).get("name") or camp_key
+                    if camp_label in used_labels:
+                        suffix = camp_key.split(":", 1)[-1][-6:]
+                        camp_label = f"{camp_label} ({suffix})"
+                    used_labels.add(camp_label)
                     data = {"spend": spend_list, "roi": roi_list}
                     if any(v is not None for v in rebate_roi_list):
                         data["rebate_roi"] = rebate_roi_list
@@ -1587,6 +1596,15 @@ function sliceDataset(ds, s, e) {{
   }};
 }}
 
+function sliceCampDatasets(arr, s, e) {{
+  const sliced = (arr || []).map(ds => sliceDataset(ds, s, e));
+  const activeLabels = new Set();
+  sliced.forEach(ds => {{
+    if (ds.yAxisID === "ySpend" && sumVals(ds.data) > 0) activeLabels.add(ds.label);
+  }});
+  return sliced.filter(ds => activeLabels.has(ds.label));
+}}
+
 function sliceSeriesMap(seriesMap, s, e) {{
   const out = {{}};
   Object.entries(seriesMap || {{}}).forEach(([k, v]) => {{
@@ -1630,7 +1648,8 @@ function getFilteredData() {{
   fd.country_summary = summarizeSeriesMap(fd.country_raw);
   fd.group_summary = {{...fd.proj_summary, ...fd.country_summary}};
   Object.entries(base.camp_ds || {{}}).forEach(([g, arr]) => {{
-    fd.camp_ds[g] = (arr || []).map(ds => sliceDataset(ds, s, e));
+    const activeCampDs = sliceCampDatasets(arr, s, e);
+    if (activeCampDs.length) fd.camp_ds[g] = activeCampDs;
   }});
   const p = base.platform || {{}};
   const spend = sliceArr(p.spend, s, e);
