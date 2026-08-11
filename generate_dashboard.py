@@ -36,6 +36,21 @@ def is_other_channel(name):
     return False
 
 # ─── 分类 & 名称 ─────────────────────────────────────────────────────────────
+COUNTRY_ALIASES = {
+    "AUS": "AU",
+}
+
+def normalize_country_label(label):
+    s = str(label or "").strip().upper()
+    if not s:
+        return s
+    parts = [COUNTRY_ALIASES.get(p.strip(), p.strip()) for p in s.split("/") if p.strip()]
+    deduped = []
+    for p in parts:
+        if p not in deduped:
+            deduped.append(p)
+    return "/".join(deduped)
+
 def classify(name, geo=None):
     if not name: return ("country", "未知")
     if re.search(r'\bJBP\b|JBP品牌', name, re.IGNORECASE):
@@ -46,11 +61,11 @@ def classify(name, geo=None):
     if re.search(r'Synapse[_\s]+全托', name, re.IGNORECASE):
         return ("project", "Synapse_全托")
     m = re.search(r'[Aa]ndroid[_\s][Aa]pp[_\s]([A-Z]{1,5}(?:/[A-Z]{1,5})?)', name, re.IGNORECASE)
-    if m: return ("country", m.group(1).upper())
+    if m: return ("country", normalize_country_label(m.group(1)))
     m = re.search(r'全托[_\s]([A-Z]{1,5})(?:[_\s]|$)', name, re.IGNORECASE)
-    if m: return ("country", m.group(1).upper())
+    if m: return ("country", normalize_country_label(m.group(1)))
     if geo:
-        g = str(geo).strip().upper()
+        g = normalize_country_label(geo)
         if g and g not in ("-", "NAN", "NONE", "未匹配"):
             return ("country", g)
     return ("country", "OTHER")
