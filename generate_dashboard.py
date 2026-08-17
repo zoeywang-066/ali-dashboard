@@ -5,6 +5,7 @@
 更新数据后重新运行即可刷新看板
 """
 
+import html as html_lib
 import json
 import re
 import subprocess
@@ -23,6 +24,53 @@ SHEET_NAME   = "最新"
 HISTORY_FILE = REPO_DIR / "data" / "ae_history_20251001_20260111.csv"
 HISTORY_START = "20251001"
 HISTORY_END   = "20260111"
+FORECAST_DIR = Path.home() / "ali-analysis" / "roi-forecast"
+FORECAST_RUNNER = FORECAST_DIR / "run_daily.sh"
+FORECAST_PAGE = FORECAST_DIR / "web" / "index.html"
+
+
+def refresh_forecast():
+    """用最新客户数据重跑预测；失败时保留上一版预测，不中断主看板。"""
+    if "--skip-forecast" in sys.argv:
+        print("  (--skip-forecast：沿用现有预测快照)")
+        return
+    if not FORECAST_RUNNER.exists():
+        print(f"  [警告] 未找到预测更新脚本，沿用现有快照: {FORECAST_RUNNER}")
+        return
+
+    print("  正在用最新客户数据校正 ROI / DAC 预测...")
+    result = subprocess.run(
+        [str(FORECAST_RUNNER)],
+        cwd=str(FORECAST_DIR),
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        print("  ✓ ROI / DAC 预测已自动校正")
+        return
+
+    details = (result.stderr or result.stdout or "未知错误").strip().splitlines()
+    tail = " | ".join(details[-3:]) if details else "未知错误"
+    print(f"  [警告] 预测刷新失败，主看板将沿用上一版预测: {tail}")
+
+
+def load_forecast_srcdoc():
+    """读取自包含预测页，并调整为适合嵌入主看板的样式。"""
+    if not FORECAST_PAGE.exists():
+        page = """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+<style>body{font:14px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#64748b;padding:32px}</style>
+<body>预测数据尚未生成，请先运行看板更新。</body></html>"""
+    else:
+        page = FORECAST_PAGE.read_text(encoding="utf-8")
+        embedded_style = """
+<style id="embedded-dashboard-style">
+  html,body{background:#f1f5f9!important}
+  .topbar{display:none!important}
+  .page{width:100%!important;max-width:none!important;padding:0 0 48px!important}
+</style>
+"""
+        page = page.replace("</head>", embedded_style + "</head>", 1)
+    return html_lib.escape(page, quote=True)
 
 # ─── 数据过滤 ────────────────────────────────────────────────────────────────
 def is_other_channel(name):
@@ -1161,7 +1209,7 @@ def build_data(records):
     return result
 
 # ─── HTML ─────────────────────────────────────────────────────────────────────
-def generate_html(data_json, all_signals_json, dac_json, dau_cost_json, generated_at):
+def generate_html(data_json, all_signals_json, dac_json, dau_cost_json, forecast_srcdoc, generated_at):
     return f"""<!DOCTYPE html>
 <html lang="zh">
 <head>
@@ -1176,7 +1224,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 .header{{background:linear-gradient(135deg,#1e293b,#334155);color:#fff;padding:18px 32px;display:flex;justify-content:space-between;align-items:center}}
 .header h1{{font-size:19px;font-weight:700}}
 .header .meta{{font-size:12px;opacity:.6}}
-.topbar{{background:#fff;border-bottom:1px solid #e2e8f0;padding:0 32px;display:flex;align-items:center}}
+.topbar{{background:#fff;border-bottom:1px solid #e2e8f0;padding:0 32px;display:flex;align-items:center;overflow-x:auto}}
 .tab{{padding:13px 22px;cursor:pointer;font-size:14px;font-weight:500;border-bottom:3px solid transparent;color:#64748b;transition:all .15s;white-space:nowrap}}
 .tab.active{{border-bottom-color:#4f46e5;color:#4f46e5}}
 .tab:hover{{color:#4f46e5}}
@@ -1191,6 +1239,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgro
 .spbtn.active{{border-color:#0891b2;background:#0891b2;color:#fff}}
 .panel{{display:none;padding:24px 32px}}
 .panel.active{{display:block}}
+.forecast-frame{{display:block;width:100%;min-height:1200px;border:0;background:#f1f5f9}}
 .section-title{{font-size:15px;font-weight:600;margin-bottom:14px;color:#0f172a;display:flex;align-items:center;gap:8px}}
 /* ── KPI bar ── */
 .kpi-bar{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:28px}}
@@ -1329,6 +1378,7 @@ canvas{{max-height:340px}}
   <div class="tab" onclick="switchTab('country')">国家视图</div>
   <div class="tab" onclick="switchTab('dau')">DAU成本</div>
   <div class="tab" onclick="switchTab('dac')">DAC成本</div>
+  <div class="tab" onclick="switchTab('forecast')">ROI预测</div>
   <div class="period-bar">
     <button class="pbtn" data-period="7" onclick="setPeriod(7)">过去 7 天</button>
     <button class="pbtn active" data-period="14" onclick="setPeriod(14)">过去 14 天</button>
@@ -1471,6 +1521,12 @@ canvas{{max-height:340px}}
   <div id="dac-special-chart-area">
     <div class="empty-hint">👆 点击「整体」或单个 campaign 卡片，查看 DAC数 / 花费 / DAC成本 / 24H GMV / ROI 分天趋势</div>
   </div>
+</div>
+
+<!-- ══ ROI预测 面板 ══ -->
+<div id="panel-forecast" class="panel">
+  <iframe id="forecast-frame" class="forecast-frame" title="阿里24H ROI与DAC成本预测"
+    srcdoc="{forecast_srcdoc}" onload="resizeForecastFrame()"></iframe>
 </div>
 
 <script>
@@ -2622,16 +2678,38 @@ function setCampMetric(m){{
 
 function switchTab(name){{
   activeTab=name;
-  const names=["home","project","country","dau","dac"];
+  const names=["home","project","country","dau","dac","forecast"];
   document.querySelectorAll(".tab").forEach((t,i)=>t.classList.toggle("active",names[i]===name));
   document.querySelectorAll(".panel").forEach(p=>p.classList.remove("active"));
   document.getElementById("panel-"+name).classList.add("active");
+  const periodBar=document.querySelector(".period-bar");
+  if(periodBar) periodBar.style.display=name==="forecast"?"none":"flex";
   // 切到某 tab 时重渲染：图表在隐藏面板里创建会塌成 0 宽，进入时需重画
   if(name==="home") renderHome();
   else if(name==="project") renderProject();
   else if(name==="country") renderCountry();
   else if(name==="dau") renderDauCost();
   else if(name==="dac") renderDac();
+  else if(name==="forecast") resizeForecastFrame();
+}}
+
+function resizeForecastFrame(){{
+  const frame=document.getElementById("forecast-frame");
+  if(!frame || !frame.contentDocument) return;
+  const doc=frame.contentDocument;
+  const resize=()=>{{
+    const height=Math.max(
+      1200,
+      doc.documentElement ? doc.documentElement.scrollHeight : 0,
+      doc.body ? doc.body.scrollHeight : 0
+    );
+    frame.style.height=height+"px";
+  }};
+  resize();
+  if(!frame._forecastObserver && frame.contentWindow && frame.contentWindow.ResizeObserver){{
+    frame._forecastObserver=new frame.contentWindow.ResizeObserver(resize);
+    frame._forecastObserver.observe(doc.documentElement);
+  }}
 }}
 
 function renderAll(){{
@@ -2652,6 +2730,7 @@ renderAll();
 # ─── 主程序 ───────────────────────────────────────────────────────────────────
 def main():
     no_push = "--no-push" in sys.argv
+    refresh_forecast()
     records      = load_data()
     data         = build_data(records)
     dac_data     = build_dac_data(records)
@@ -2662,8 +2741,11 @@ def main():
     all_signals_json = json.dumps(all_signals, ensure_ascii=False)
     dac_json         = json.dumps(dac_data,    ensure_ascii=False)
     dau_cost_json    = json.dumps(dau_cost_data, ensure_ascii=False)
+    forecast_srcdoc  = load_forecast_srcdoc()
     generated        = datetime.now().strftime("%Y-%m-%d %H:%M")
-    html             = generate_html(data_json, all_signals_json, dac_json, dau_cost_json, generated)
+    html             = generate_html(
+        data_json, all_signals_json, dac_json, dau_cost_json, forecast_srcdoc, generated
+    )
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         f.write(html)
