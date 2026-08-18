@@ -118,6 +118,27 @@ def classify(name, geo=None):
             return ("country", g)
     return ("country", "OTHER")
 
+def extract_country(name, geo=None):
+    """Extract the actual delivery country without project-level grouping."""
+    campaign_name = str(name or "")
+    m = re.search(
+        r'(?:android|ios)[_\s]+app[_\s]+'
+        r'(?:(?:EU10|others)[_\s]+)?'
+        r'([A-Z]{2,5}(?:/[A-Z]{2,5})?)(?:[_\s]|$)',
+        campaign_name,
+        re.IGNORECASE,
+    )
+    if m:
+        return normalize_country_label(m.group(1))
+    m = re.search(r'全托[_\s]([A-Z]{1,5})(?:[_\s]|$)', campaign_name, re.IGNORECASE)
+    if m:
+        return normalize_country_label(m.group(1))
+    if geo:
+        country = normalize_country_label(geo)
+        if country and country not in ("-", "NAN", "NONE", "未匹配"):
+            return country
+    return "OTHER"
+
 def short_name(name):
     for pfx in ("AliExpress_moloco_rmkt_rta_", "AliExpress_moloco_rmkt_null_"):
         if name.startswith(pfx): name = name[len(pfx):]
@@ -834,6 +855,119 @@ def build_dau_cost_data(records):
         }
     }
 
+# ─── 返点后效果监测（costdsp返点后口径）──────────────────────────────────────
+def build_rebate_monitor_data(records, start_ds="20260814"):
+    """Build an isolated monitoring dataset using costdsp返点后 as spend."""
+    eligible = [
+        r for r in records
+        if r.get("ds", "") >= start_ds and r.get("rebate_spend") is not None
+    ]
+    if not eligible:
+        return {"start_ds": start_ds, "dates": [], "labels": [], "platform": {},
+                "countries": {}, "campaigns": {}, "dac_campaigns": {}}
+
+    dates = sorted({r["ds"] for r in eligible})
+    platform_daily = defaultdict(lambda: {"spend": 0.0, "gmv": 0.0, "dac": 0.0})
+    country_daily = defaultdict(lambda: defaultdict(lambda: {"spend": 0.0, "gmv": 0.0, "dac": 0.0}))
+    campaign_daily = defaultdict(lambda: defaultdict(lambda: {"spend": 0.0, "gmv": 0.0, "dac": 0.0}))
+    campaign_meta = {}
+
+    dac_campaign_keys = set()
+    for r in eligible:
+        cid = str(r.get("cid") or "").strip()
+        key = f"cid:{cid}" if cid else f"name:{r.get('name') or 'unknown'}"
+        if "DAC专项" in str(r.get("name") or ""):
+            dac_campaign_keys.add(key)
+
+    for row_i, r in enumerate(eligible):
+        ds = r["ds"]
+        spend = float(r.get("rebate_spend") or 0)
+        gmv = float(r.get("gmv") or 0)
+        dac = float(r.get("dac") or 0)
+        country = extract_country(r.get("name"), r.get("geo"))
+        cid = str(r.get("cid") or "").strip()
+        key = f"cid:{cid}" if cid else f"name:{r.get('name') or 'unknown'}"
+
+        platform_daily[ds]["spend"] += spend
+        platform_daily[ds]["gmv"] += gmv
+        platform_daily[ds]["dac"] += dac
+        country_daily[country][ds]["spend"] += spend
+        country_daily[country][ds]["gmv"] += gmv
+        country_daily[country][ds]["dac"] += dac
+        campaign_daily[key][ds]["spend"] += spend
+        campaign_daily[key][ds]["gmv"] += gmv
+        campaign_daily[key][ds]["dac"] += dac
+
+        previous = campaign_meta.get(key)
+        position = (str(ds), row_i)
+        if previous is None or position >= previous["position"]:
+            campaign_meta[key] = {
+                "position": position,
+                "campaign_id": cid,
+                "campaign_name": str(r.get("name") or "未知 campaign"),
+                "country": country,
+            }
+
+    def make_entity(ds_map, include_dac=False):
+        spend_series = [round(ds_map.get(d, {}).get("spend", 0), 2) for d in dates]
+        gmv_series = [round(ds_map.get(d, {}).get("gmv", 0), 2) for d in dates]
+        roi_series = [
+            round(ds_map[d]["gmv"] / ds_map[d]["spend"], 2)
+            if ds_map.get(d, {}).get("spend", 0) > 0 else None
+            for d in dates
+        ]
+        total_spend = sum(spend_series)
+        total_gmv = sum(gmv_series)
+        entity = {
+            "spend_series": spend_series,
+            "gmv_series": gmv_series,
+            "roi_series": roi_series,
+            "spend": round(total_spend, 2),
+            "gmv": round(total_gmv, 2),
+            "roi": round(total_gmv / total_spend, 2) if total_spend > 0 else None,
+        }
+        if include_dac:
+            dac_series = [round(ds_map.get(d, {}).get("dac", 0), 2) for d in dates]
+            dac_cost_series = [
+                round(ds_map[d]["spend"] / ds_map[d]["dac"], 2)
+                if ds_map.get(d, {}).get("dac", 0) > 0 else None
+                for d in dates
+            ]
+            total_dac = sum(dac_series)
+            entity.update({
+                "dac_series": dac_series,
+                "dac_cost_series": dac_cost_series,
+                "dac": round(total_dac, 2),
+                "dac_cost": round(total_spend / total_dac, 2) if total_dac > 0 else None,
+            })
+        return entity
+
+    countries = {country: make_entity(ds_map) for country, ds_map in country_daily.items()}
+    campaigns = {}
+    dac_campaigns = {}
+    for key, ds_map in campaign_daily.items():
+        meta = campaign_meta[key]
+        entity = {**meta, **make_entity(ds_map, include_dac=key in dac_campaign_keys)}
+        entity.pop("position", None)
+        campaigns[key] = entity
+        if key in dac_campaign_keys:
+            dac_campaigns[key] = entity
+
+    result = {
+        "start_ds": start_ds,
+        "dates": dates,
+        "labels": fmt_dates(dates),
+        "platform": make_entity(platform_daily),
+        "countries": countries,
+        "campaigns": campaigns,
+        "dac_campaigns": dac_campaigns,
+    }
+    print(
+        f"  [返点后] {dates[0]}~{dates[-1]}: {len(countries)} 个国家 · "
+        f"{len(campaigns)} 个 campaign · DAC专项 {len(dac_campaigns)} 个"
+    )
+    return result
+
 # ─── 日期窗口 ─────────────────────────────────────────────────────────────────
 def get_all_dates(records):
     return sorted({r["ds"] for r in records if str(r.get("ds", "")).isdigit()})
@@ -1209,7 +1343,7 @@ def build_data(records):
     return result
 
 # ─── HTML ─────────────────────────────────────────────────────────────────────
-def generate_html(data_json, all_signals_json, dac_json, dau_cost_json, forecast_srcdoc, generated_at):
+def generate_html(data_json, all_signals_json, dac_json, dau_cost_json, rebate_json, forecast_srcdoc, generated_at):
     return f"""<!DOCTYPE html>
 <html lang="zh">
 <head>
@@ -1298,6 +1432,12 @@ canvas{{max-height:340px}}
 .metric-table th:first-child,.metric-table td:first-child{{text-align:left;position:sticky;left:0;background:#fff;z-index:1;max-width:360px;overflow:hidden;text-overflow:ellipsis}}
 .metric-table thead th{{background:#f8fafc;color:#475569;font-weight:700}}
 .metric-table thead th:first-child{{background:#f8fafc;z-index:2}}
+.metric-table tbody tr.monitor-row{{cursor:pointer}}
+.metric-table tbody tr.monitor-row:hover td{{background:#f8fafc}}
+.metric-table tbody tr.monitor-row.selected td{{background:#eef2ff;color:#312e81}}
+.metric-table tbody tr.monitor-row.selected td:first-child{{background:#eef2ff}}
+.rebate-scope{{font-size:12px;color:#64748b;margin:-6px 0 16px}}
+.rebate-table-title{{font-size:13px;font-weight:700;color:#334155;margin:4px 0 10px}}
 .group-chips{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}}
 .chip{{padding:6px 14px;border-radius:99px;border:1.5px solid #e2e8f0;background:#fff;font-size:13px;font-weight:500;cursor:pointer;color:#475569;transition:all .15s}}
 .chip:hover{{border-color:#a5b4fc;color:#4f46e5}}
@@ -1378,6 +1518,7 @@ canvas{{max-height:340px}}
   <div class="tab" onclick="switchTab('country')">国家视图</div>
   <div class="tab" onclick="switchTab('dau')">DAU成本</div>
   <div class="tab" onclick="switchTab('dac')">DAC成本</div>
+  <div class="tab" onclick="switchTab('rebate')">返点后监测</div>
   <div class="tab" onclick="switchTab('forecast')">ROI预测</div>
   <div class="period-bar">
     <button class="pbtn" data-period="7" onclick="setPeriod(7)">过去 7 天</button>
@@ -1523,6 +1664,33 @@ canvas{{max-height:340px}}
   </div>
 </div>
 
+<!-- ══ 返点后效果监测 面板 ══ -->
+<div id="panel-rebate" class="panel">
+  <div class="section-title">返点后效果监测</div>
+  <div id="rebate-range-note" class="rebate-scope">2026-08-14 起 · 支出口径：costdsp返点后</div>
+  <div id="rebate-kpis" class="kpi-bar"></div>
+
+  <div class="chart-box">
+    <div class="chart-hd">平台返点后支出（柱）& ROI（线）
+      <span class="badge">ROI = Σ24h_gmv / Σcostdsp返点后</span></div>
+    <canvas id="rebatePlatformChart"></canvas>
+  </div>
+
+  <div class="section-title">分国家返点后 ROI</div>
+  <div id="rebate-country-cards" class="cards"></div>
+  <div id="rebate-country-chart-area"></div>
+
+  <div class="section-title">分 Campaign 返点后 ROI</div>
+  <div id="rebate-campaign-chart-area"></div>
+  <div class="rebate-table-title">Campaign 汇总（按返点后支出降序）</div>
+  <div id="rebate-campaign-table"></div>
+
+  <div class="section-title" style="margin-top:30px">DAC Campaign 返点后 DAC成本</div>
+  <div id="rebate-dac-chart-area"></div>
+  <div class="rebate-table-title">DAC Campaign 汇总（DAC成本 = Σcostdsp返点后 / Σ24h_dac）</div>
+  <div id="rebate-dac-table"></div>
+</div>
+
 <!-- ══ ROI预测 面板 ══ -->
 <div id="panel-forecast" class="panel">
   <iframe id="forecast-frame" class="forecast-frame" title="阿里24H ROI与DAC成本预测"
@@ -1534,6 +1702,7 @@ const ALL         = {data_json};
 const ALL_SIGNALS = {all_signals_json};
 const DAC_DATA    = {dac_json};
 const DAU_COST_DATA = {dau_cost_json};
+const REBATE_DATA = {rebate_json};
 
 const DAC_PALETTE = [
   [59,130,246],[245,158,11],[139,92,246],[236,72,153],[20,184,166],
@@ -1551,11 +1720,15 @@ let campMetric     = "both";
 let selDauCountry  = null;
 let selDacCountry  = null;
 let selDacSpecial  = null;
+let selRebateCountry = null;
+let selRebateCampaign = null;
+let selRebateDac = null;
 
 let platformChart=null, projChart=null, countryChart=null, projectCampChart=null, countryCampChart=null;
 let dauTrendChart=null, dauCampChart=null;
 let dacTrendChart=null, dacCampChart=null;
 let dacSpecSpendChart=null, dacSpecCostChart=null, dacSpecRoiChart=null;
+let rebatePlatformChart=null, rebateCountryChart=null, rebateCampaignChart=null, rebateDacChart=null;
 
 if (typeof ChartDataLabels !== "undefined") Chart.register(ChartDataLabels);
 
@@ -1619,6 +1792,7 @@ function setCustomDateRange() {{
   renderAll();
   if (activeTab === "dau") renderDauCost();
   if (activeTab === "dac") renderDac();
+  if (activeTab === "rebate") renderRebate();
 }}
 
 function setPeriod(n) {{
@@ -1630,6 +1804,7 @@ function setPeriod(n) {{
   renderAll();
   if (activeTab === "dau") renderDauCost();
   if (activeTab === "dac") renderDac();
+  if (activeTab === "rebate") renderRebate();
 }}
 
 function getSliceRange(dates) {{
@@ -1844,6 +2019,77 @@ function getFilteredDauCostData() {{
     if (Object.keys(out).length) camp_daily[c] = out;
   }});
   return {{...base, dates: sliceArr(dates, s, e), labels, country_summary, country_daily, camp_daily}};
+}}
+
+function sliceRebateEntity(entity, indexes) {{
+  const pick = arr => indexes.map(i => (arr || [])[i] ?? null);
+  const spendSeries = pick(entity.spend_series);
+  const gmvSeries = pick(entity.gmv_series);
+  const spend = sumVals(spendSeries);
+  const gmv = sumVals(gmvSeries);
+  const result = {{
+    ...entity,
+    spend_series: spendSeries,
+    gmv_series: gmvSeries,
+    roi_series: indexes.map((_, j) =>
+      Number(spendSeries[j]) > 0 ? Number((Number(gmvSeries[j] || 0) / Number(spendSeries[j])).toFixed(2)) : null),
+    spend: Number(spend.toFixed(2)),
+    gmv: Number(gmv.toFixed(2)),
+    roi: spend > 0 ? Number((gmv / spend).toFixed(2)) : null,
+  }};
+  if (Array.isArray(entity.dac_series)) {{
+    const dacSeries = pick(entity.dac_series);
+    const dac = sumVals(dacSeries);
+    result.dac_series = dacSeries;
+    result.dac_cost_series = indexes.map((_, j) =>
+      Number(dacSeries[j]) > 0 ? Number((Number(spendSeries[j] || 0) / Number(dacSeries[j])).toFixed(2)) : null);
+    result.dac = Number(dac.toFixed(2));
+    result.dac_cost = dac > 0 ? Number((spend / dac).toFixed(2)) : null;
+  }}
+  return result;
+}}
+
+function getFilteredRebateData() {{
+  const base = REBATE_DATA || {{}};
+  const dates = base.dates || [];
+  const start = dateStart || base.start_ds || (dates[0] || "");
+  const end = dateEnd || (dates[dates.length - 1] || "");
+  const indexes = dates.map((d, i) => (d >= start && d <= end ? i : -1)).filter(i => i >= 0);
+  if (!indexes.length) {{
+    return {{...base, dates: [], labels: [], platform: {{}}, countries: {{}}, campaigns: {{}}, dac_campaigns: {{}}}};
+  }}
+  const sliceMap = source => Object.fromEntries(
+    Object.entries(source || {{}}).map(([key, entity]) => [key, sliceRebateEntity(entity, indexes)])
+  );
+  return {{
+    ...base,
+    dates: indexes.map(i => dates[i]),
+    labels: indexes.map(i => (base.labels || [])[i]),
+    platform: sliceRebateEntity(base.platform || {{}}, indexes),
+    countries: sliceMap(base.countries),
+    campaigns: sliceMap(base.campaigns),
+    dac_campaigns: sliceMap(base.dac_campaigns),
+  }};
+}}
+
+function fmtUsd(v) {{
+  return v === null || v === undefined || Number.isNaN(Number(v))
+    ? "-"
+    : "$" + Number(v).toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}});
+}}
+
+function fmtRoi(v) {{
+  return v === null || v === undefined || Number.isNaN(Number(v)) ? "-" : Number(v).toFixed(2) + "x";
+}}
+
+function fmtCount(v) {{
+  return Number(v || 0).toLocaleString(undefined, {{maximumFractionDigits: 0}});
+}}
+
+function escHtml(v) {{
+  return String(v ?? "").replace(/[&<>"']/g, ch => ({{
+    "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;"
+  }})[ch]);
 }}
 
 // ── Chart factory ────────────────────────────────────────────────────────────
@@ -2318,6 +2564,214 @@ function renderDauCost() {{
   }});
 }}
 
+// ── 返点后效果监测 ───────────────────────────────────────────────────────────
+function selectRebateCountry(country) {{
+  selRebateCountry = country;
+  renderRebate();
+}}
+
+function selectRebateCampaign(key) {{
+  selRebateCampaign = key;
+  renderRebate();
+}}
+
+function selectRebateDac(key) {{
+  selRebateDac = key;
+  renderRebate();
+}}
+
+function rebateComboDatasets(entity, label) {{
+  return [
+    {{
+      label: label + " 返点后支出",
+      data: entity.spend_series || [],
+      backgroundColor: "rgba(14,165,233,0.42)",
+      borderColor: "#0ea5e9",
+      borderWidth: 1,
+      yAxisID: "ySpend",
+      type: "bar",
+      stack: "spend",
+    }},
+    {{
+      label: label + " ROI",
+      data: entity.roi_series || [],
+      borderColor: "#059669",
+      backgroundColor: "transparent",
+      borderWidth: 2.8,
+      pointRadius: 5,
+      pointHoverRadius: 7,
+      tension: 0.3,
+      yAxisID: "yROI",
+      type: "line",
+      spanGaps: true,
+    }},
+  ];
+}}
+
+function hasRebateActivity(entity) {{
+  return Math.abs(Number(entity.spend || 0)) > 0.0001 || Math.abs(Number(entity.gmv || 0)) > 0.0001;
+}}
+
+function renderRebateCampaignTable(entries) {{
+  const target = document.getElementById("rebate-campaign-table");
+  if (!target) return;
+  if (!entries.length) {{
+    target.innerHTML = '<div class="empty-hint">当前日期范围暂无返点后 Campaign 数据</div>';
+    return;
+  }}
+  const rows = entries.map(([key, entity]) => `
+    <tr class="monitor-row${{selRebateCampaign === key ? " selected" : ""}}" data-key="${{encodeURIComponent(key)}}">
+      <td>${{escHtml(entity.country || "OTHER")}}</td>
+      <td style="text-align:left;max-width:420px;overflow:hidden;text-overflow:ellipsis" title="${{escHtml(entity.campaign_name)}}">${{escHtml(entity.campaign_name)}}</td>
+      <td style="text-align:left">${{escHtml(entity.campaign_id || "-")}}</td>
+      <td>${{fmtUsd(entity.spend)}}</td>
+      <td>${{fmtUsd(entity.gmv)}}</td>
+      <td>${{fmtRoi(entity.roi)}}</td>
+    </tr>`).join("");
+  target.innerHTML = `<div class="table-wrap"><table class="metric-table">
+    <thead><tr><th>国家</th><th style="text-align:left">Campaign Name</th><th style="text-align:left">Campaign ID</th><th>costdsp返点后</th><th>24H GMV</th><th>返点后 ROI</th></tr></thead>
+    <tbody>${{rows}}</tbody>
+  </table></div>`;
+  target.querySelectorAll("tr[data-key]").forEach(row => {{
+    row.onclick = () => selectRebateCampaign(decodeURIComponent(row.dataset.key));
+  }});
+}}
+
+function renderRebateDacTable(entries) {{
+  const target = document.getElementById("rebate-dac-table");
+  if (!target) return;
+  if (!entries.length) {{
+    target.innerHTML = '<div class="empty-hint">当前日期范围暂无 DAC Campaign 数据</div>';
+    return;
+  }}
+  const rows = entries.map(([key, entity]) => `
+    <tr class="monitor-row${{selRebateDac === key ? " selected" : ""}}" data-key="${{encodeURIComponent(key)}}">
+      <td>${{escHtml(entity.country || "OTHER")}}</td>
+      <td style="text-align:left;max-width:420px;overflow:hidden;text-overflow:ellipsis" title="${{escHtml(entity.campaign_name)}}">${{escHtml(entity.campaign_name)}}</td>
+      <td style="text-align:left">${{escHtml(entity.campaign_id || "-")}}</td>
+      <td>${{fmtUsd(entity.spend)}}</td>
+      <td>${{fmtCount(entity.dac)}}</td>
+      <td>${{fmtUsd(entity.dac_cost)}}</td>
+    </tr>`).join("");
+  target.innerHTML = `<div class="table-wrap"><table class="metric-table">
+    <thead><tr><th>国家</th><th style="text-align:left">Campaign Name</th><th style="text-align:left">Campaign ID</th><th>costdsp返点后</th><th>24H DAC</th><th>返点后 DAC成本</th></tr></thead>
+    <tbody>${{rows}}</tbody>
+  </table></div>`;
+  target.querySelectorAll("tr[data-key]").forEach(row => {{
+    row.onclick = () => selectRebateDac(decodeURIComponent(row.dataset.key));
+  }});
+}}
+
+function makeRebateDacChart(entity, labels, dates) {{
+  if (rebateDacChart) rebateDacChart.destroy();
+  return new Chart(document.getElementById("rebateDacChart"), {{
+    type: "bar",
+    data: {{
+      labels,
+      dates,
+      datasets: [
+        {{label:"返点后支出",data:entity.spend_series||[],backgroundColor:"rgba(14,165,233,.42)",borderColor:"#0ea5e9",borderWidth:1,yAxisID:"ySpend",type:"bar"}},
+        {{label:"DAC成本",data:entity.dac_cost_series||[],borderColor:"#7c3aed",backgroundColor:"transparent",borderWidth:2.8,pointRadius:5,pointHoverRadius:7,tension:.3,spanGaps:true,yAxisID:"yCost",type:"line"}},
+      ],
+    }},
+    options: {{
+      responsive:true,
+      interaction:{{mode:"index",intersect:false}},
+      scales:{{
+        x:weekendXAxis(),
+        ySpend:{{type:"linear",position:"left",title:{{display:true,text:"返点后支出 (USD)"}},ticks:{{callback:v=>"$"+v.toLocaleString()}}}},
+        yCost:{{type:"linear",position:"right",min:0,title:{{display:true,text:"DAC成本 (USD)"}},grid:{{drawOnChartArea:false}},ticks:{{callback:v=>"$"+v}}}},
+      }},
+      plugins:{{
+        legend:{{position:"top",labels:{{usePointStyle:true,pointStyleWidth:12}}}},
+        tooltip:{{callbacks:{{label:ctx=>ctx.dataset.yAxisID==="ySpend"
+          ? ctx.dataset.label+": "+fmtUsd(ctx.parsed.y)
+          : ctx.dataset.label+": "+fmtUsd(ctx.parsed.y)+" · DAC: "+fmtCount((entity.dac_series||[])[ctx.dataIndex])}}}},
+        datalabels:{{display:ctx=>ctx.dataset.yAxisID==="yCost",formatter:v=>v!=null?fmtUsd(v):null,color:"#7c3aed",font:{{size:11,weight:"700"}},anchor:"end",align:"top",offset:3,backgroundColor:"rgba(255,255,255,.85)",borderRadius:3,padding:{{top:2,bottom:2,left:4,right:4}}}},
+      }},
+    }},
+  }});
+}}
+
+function renderRebate() {{
+  const d = getFilteredRebateData();
+  const platform = d.platform || {{}};
+  const countries = Object.entries(d.countries || {{}})
+    .filter(([, entity]) => hasRebateActivity(entity))
+    .sort((a, b) => Number(b[1].spend || 0) - Number(a[1].spend || 0));
+  const campaigns = Object.entries(d.campaigns || {{}})
+    .filter(([, entity]) => hasRebateActivity(entity))
+    .sort((a, b) => Number(b[1].spend || 0) - Number(a[1].spend || 0));
+  const dacCampaigns = Object.entries(d.dac_campaigns || {{}})
+    .filter(([, entity]) => hasRebateActivity(entity) || Number(entity.dac || 0) > 0)
+    .sort((a, b) => Number(b[1].spend || 0) - Number(a[1].spend || 0));
+
+  const note = document.getElementById("rebate-range-note");
+  if (note) note.textContent = d.dates.length
+    ? `${{dsToInput(d.dates[0])}} 至 ${{dsToInput(d.dates[d.dates.length-1])}} · 支出口径：costdsp返点后 · 数据最早从 2026-08-14 开始`
+    : "当前日期筛选范围内暂无返点后数据（数据最早从 2026-08-14 开始）";
+
+  const dacSpend = dacCampaigns.reduce((sum, [, e]) => sum + Number(e.spend || 0), 0);
+  const dacCount = dacCampaigns.reduce((sum, [, e]) => sum + Number(e.dac || 0), 0);
+  const dacCost = dacCount > 0 ? dacSpend / dacCount : null;
+  document.getElementById("rebate-kpis").innerHTML = `
+    <div class="kpi"><div class="k-label">返点后总支出</div><div class="k-val">${{fmtUsd(platform.spend)}}</div><div class="k-sub" style="color:#64748b">Σcostdsp返点后</div></div>
+    <div class="kpi"><div class="k-label">24H GMV</div><div class="k-val">${{fmtUsd(platform.gmv)}}</div><div class="k-sub" style="color:#64748b">客户后端数据</div></div>
+    <div class="kpi green"><div class="k-label">平台返点后 ROI</div><div class="k-val">${{fmtRoi(platform.roi)}}</div><div class="k-sub" style="color:#64748b">ΣGMV / Σ返点后支出</div></div>
+    <div class="kpi"><div class="k-label">有数 Campaign</div><div class="k-val">${{campaigns.length}}</div><div class="k-sub" style="color:#64748b">当前日期范围</div></div>
+    <div class="kpi amber"><div class="k-label">DAC Campaign DAC数</div><div class="k-val">${{fmtCount(dacCount)}}</div><div class="k-sub" style="color:#64748b">Σ24h_dac</div></div>
+    <div class="kpi amber"><div class="k-label">DAC Campaign DAC成本</div><div class="k-val">${{fmtUsd(dacCost)}}</div><div class="k-sub" style="color:#64748b">Σ返点后支出 / ΣDAC</div></div>`;
+
+  if (rebatePlatformChart) {{ rebatePlatformChart.destroy(); rebatePlatformChart = null; }}
+  if (d.dates.length) {{
+    rebatePlatformChart = makeChart("rebatePlatformChart", rebateComboDatasets(platform, "平台"), d.labels, null, {{dates:d.dates}});
+  }}
+
+  if (!countries.some(([key]) => key === selRebateCountry)) selRebateCountry = countries[0]?.[0] || null;
+  const countryCards = document.getElementById("rebate-country-cards");
+  countryCards.innerHTML = "";
+  countries.forEach(([country, entity]) => {{
+    const card = document.createElement("div");
+    card.className = "card" + (selRebateCountry === country ? " selected" : "");
+    card.innerHTML = `<div class="name">${{escHtml(country)}}</div><div class="spend">${{fmtUsd(entity.spend)}}</div><div class="roi">ROI: ${{fmtRoi(entity.roi)}} · GMV: ${{fmtUsd(entity.gmv)}}</div>`;
+    card.onclick = () => selectRebateCountry(country);
+    countryCards.appendChild(card);
+  }});
+  const countryArea = document.getElementById("rebate-country-chart-area");
+  if (rebateCountryChart) {{ rebateCountryChart.destroy(); rebateCountryChart = null; }}
+  if (selRebateCountry && d.countries[selRebateCountry]) {{
+    const entity = d.countries[selRebateCountry];
+    countryArea.innerHTML = `<div class="chart-box"><div class="chart-hd">${{escHtml(selRebateCountry)}} 返点后支出（柱）& ROI（线）<span class="badge">${{fmtUsd(entity.spend)}} · ${{fmtRoi(entity.roi)}}</span></div><canvas id="rebateCountryChart"></canvas></div>`;
+    rebateCountryChart = makeChart("rebateCountryChart", rebateComboDatasets(entity, selRebateCountry), d.labels, null, {{dates:d.dates}});
+  }} else {{
+    countryArea.innerHTML = '<div class="empty-hint">当前日期范围暂无国家返点后数据</div>';
+  }}
+
+  if (!campaigns.some(([key]) => key === selRebateCampaign)) selRebateCampaign = campaigns[0]?.[0] || null;
+  renderRebateCampaignTable(campaigns);
+  const campaignArea = document.getElementById("rebate-campaign-chart-area");
+  if (rebateCampaignChart) {{ rebateCampaignChart.destroy(); rebateCampaignChart = null; }}
+  if (selRebateCampaign && d.campaigns[selRebateCampaign]) {{
+    const entity = d.campaigns[selRebateCampaign];
+    campaignArea.innerHTML = `<div class="chart-box"><div class="chart-hd">${{escHtml(entity.campaign_name)}}<span class="badge">${{escHtml(entity.country)}} · ${{fmtUsd(entity.spend)}} · ROI ${{fmtRoi(entity.roi)}}</span></div><canvas id="rebateCampaignChart"></canvas></div>`;
+    rebateCampaignChart = makeChart("rebateCampaignChart", rebateComboDatasets(entity, "Campaign"), d.labels, null, {{dates:d.dates}});
+  }} else {{
+    campaignArea.innerHTML = '<div class="empty-hint">当前日期范围暂无 Campaign 返点后数据</div>';
+  }}
+
+  if (!dacCampaigns.some(([key]) => key === selRebateDac)) selRebateDac = dacCampaigns[0]?.[0] || null;
+  renderRebateDacTable(dacCampaigns);
+  const dacArea = document.getElementById("rebate-dac-chart-area");
+  if (rebateDacChart) {{ rebateDacChart.destroy(); rebateDacChart = null; }}
+  if (selRebateDac && d.dac_campaigns[selRebateDac]) {{
+    const entity = d.dac_campaigns[selRebateDac];
+    dacArea.innerHTML = `<div class="chart-box"><div class="chart-hd">${{escHtml(entity.campaign_name)}}<span class="badge">${{escHtml(entity.country)}} · DAC ${{fmtCount(entity.dac)}} · 成本 ${{fmtUsd(entity.dac_cost)}}</span></div><canvas id="rebateDacChart"></canvas></div>`;
+    rebateDacChart = makeRebateDacChart(entity, d.labels, d.dates);
+  }} else {{
+    dacArea.innerHTML = '<div class="empty-hint">当前日期范围暂无 DAC Campaign 数据</div>';
+  }}
+}}
+
 // ── DAC成本 面板 ─────────────────────────────────────────────────────────────
 function setDacPeriod(n) {{
   dacPeriod = n;
@@ -2678,7 +3132,7 @@ function setCampMetric(m){{
 
 function switchTab(name){{
   activeTab=name;
-  const names=["home","project","country","dau","dac","forecast"];
+  const names=["home","project","country","dau","dac","rebate","forecast"];
   document.querySelectorAll(".tab").forEach((t,i)=>t.classList.toggle("active",names[i]===name));
   document.querySelectorAll(".panel").forEach(p=>p.classList.remove("active"));
   document.getElementById("panel-"+name).classList.add("active");
@@ -2690,6 +3144,7 @@ function switchTab(name){{
   else if(name==="country") renderCountry();
   else if(name==="dau") renderDauCost();
   else if(name==="dac") renderDac();
+  else if(name==="rebate") renderRebate();
   else if(name==="forecast") resizeForecastFrame();
 }}
 
@@ -2735,16 +3190,18 @@ def main():
     data         = build_data(records)
     dac_data     = build_dac_data(records)
     dau_cost_data = build_dau_cost_data(records)
+    rebate_data  = build_rebate_monitor_data(records)
     all_signals, overall_roi = compute_all_signals(records)
 
     data_json        = json.dumps(data,        ensure_ascii=False)
     all_signals_json = json.dumps(all_signals, ensure_ascii=False)
     dac_json         = json.dumps(dac_data,    ensure_ascii=False)
     dau_cost_json    = json.dumps(dau_cost_data, ensure_ascii=False)
+    rebate_json      = json.dumps(rebate_data, ensure_ascii=False)
     forecast_srcdoc  = load_forecast_srcdoc()
     generated        = datetime.now().strftime("%Y-%m-%d %H:%M")
     html             = generate_html(
-        data_json, all_signals_json, dac_json, dau_cost_json, forecast_srcdoc, generated
+        data_json, all_signals_json, dac_json, dau_cost_json, rebate_json, forecast_srcdoc, generated
     )
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
