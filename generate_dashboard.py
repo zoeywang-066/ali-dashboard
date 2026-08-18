@@ -2075,6 +2075,12 @@ function getFilteredRebateData() {{
 function fmtUsd(v) {{
   return v === null || v === undefined || Number.isNaN(Number(v))
     ? "-"
+    : "$" + Number(v).toLocaleString(undefined, {{maximumFractionDigits: 0}});
+}}
+
+function fmtDacCost(v) {{
+  return v === null || v === undefined || Number.isNaN(Number(v))
+    ? "-"
     : "$" + Number(v).toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 2}});
 }}
 
@@ -2651,7 +2657,7 @@ function renderRebateDacTable(entries) {{
       <td style="text-align:left">${{escHtml(entity.campaign_id || "-")}}</td>
       <td>${{fmtUsd(entity.spend)}}</td>
       <td>${{fmtCount(entity.dac)}}</td>
-      <td>${{fmtUsd(entity.dac_cost)}}</td>
+      <td>${{fmtDacCost(entity.dac_cost)}}</td>
     </tr>`).join("");
   target.innerHTML = `<div class="table-wrap"><table class="metric-table">
     <thead><tr><th>国家</th><th style="text-align:left">Campaign Name</th><th style="text-align:left">Campaign ID</th><th>costdsp返点后</th><th>24H DAC</th><th>返点后 DAC成本</th></tr></thead>
@@ -2686,8 +2692,8 @@ function makeRebateDacChart(entity, labels, dates) {{
         legend:{{position:"top",labels:{{usePointStyle:true,pointStyleWidth:12}}}},
         tooltip:{{callbacks:{{label:ctx=>ctx.dataset.yAxisID==="ySpend"
           ? ctx.dataset.label+": "+fmtUsd(ctx.parsed.y)
-          : ctx.dataset.label+": "+fmtUsd(ctx.parsed.y)+" · DAC: "+fmtCount((entity.dac_series||[])[ctx.dataIndex])}}}},
-        datalabels:{{display:ctx=>ctx.dataset.yAxisID==="yCost",formatter:v=>v!=null?fmtUsd(v):null,color:"#7c3aed",font:{{size:11,weight:"700"}},anchor:"end",align:"top",offset:3,backgroundColor:"rgba(255,255,255,.85)",borderRadius:3,padding:{{top:2,bottom:2,left:4,right:4}}}},
+          : ctx.dataset.label+": "+fmtDacCost(ctx.parsed.y)+" · DAC: "+fmtCount((entity.dac_series||[])[ctx.dataIndex])}}}},
+        datalabels:{{display:ctx=>ctx.dataset.yAxisID==="yCost",formatter:v=>v!=null?fmtDacCost(v):null,color:"#7c3aed",font:{{size:11,weight:"700"}},anchor:"end",align:"top",offset:3,backgroundColor:"rgba(255,255,255,.85)",borderRadius:3,padding:{{top:2,bottom:2,left:4,right:4}}}},
       }},
     }},
   }});
@@ -2720,7 +2726,7 @@ function renderRebate() {{
     <div class="kpi green"><div class="k-label">平台返点后 ROI</div><div class="k-val">${{fmtRoi(platform.roi)}}</div><div class="k-sub" style="color:#64748b">ΣGMV / Σ返点后支出</div></div>
     <div class="kpi"><div class="k-label">有数 Campaign</div><div class="k-val">${{campaigns.length}}</div><div class="k-sub" style="color:#64748b">当前日期范围</div></div>
     <div class="kpi amber"><div class="k-label">DAC Campaign DAC数</div><div class="k-val">${{fmtCount(dacCount)}}</div><div class="k-sub" style="color:#64748b">Σ24h_dac</div></div>
-    <div class="kpi amber"><div class="k-label">DAC Campaign DAC成本</div><div class="k-val">${{fmtUsd(dacCost)}}</div><div class="k-sub" style="color:#64748b">Σ返点后支出 / ΣDAC</div></div>`;
+    <div class="kpi amber"><div class="k-label">DAC Campaign DAC成本</div><div class="k-val">${{fmtDacCost(dacCost)}}</div><div class="k-sub" style="color:#64748b">Σ返点后支出 / ΣDAC</div></div>`;
 
   if (rebatePlatformChart) {{ rebatePlatformChart.destroy(); rebatePlatformChart = null; }}
   if (d.dates.length) {{
@@ -2765,7 +2771,7 @@ function renderRebate() {{
   if (rebateDacChart) {{ rebateDacChart.destroy(); rebateDacChart = null; }}
   if (selRebateDac && d.dac_campaigns[selRebateDac]) {{
     const entity = d.dac_campaigns[selRebateDac];
-    dacArea.innerHTML = `<div class="chart-box"><div class="chart-hd">${{escHtml(entity.campaign_name)}}<span class="badge">${{escHtml(entity.country)}} · DAC ${{fmtCount(entity.dac)}} · 成本 ${{fmtUsd(entity.dac_cost)}}</span></div><canvas id="rebateDacChart"></canvas></div>`;
+    dacArea.innerHTML = `<div class="chart-box"><div class="chart-hd">${{escHtml(entity.campaign_name)}}<span class="badge">${{escHtml(entity.country)}} · DAC ${{fmtCount(entity.dac)}} · 成本 ${{fmtDacCost(entity.dac_cost)}}</span></div><canvas id="rebateDacChart"></canvas></div>`;
     rebateDacChart = makeRebateDacChart(entity, d.labels, d.dates);
   }} else {{
     dacArea.innerHTML = '<div class="empty-hint">当前日期范围暂无 DAC Campaign 数据</div>';
