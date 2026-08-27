@@ -27,6 +27,8 @@ HISTORY_END   = "20260111"
 FORECAST_DIR = Path.home() / "ali-analysis" / "roi-forecast"
 FORECAST_RUNNER = FORECAST_DIR / "run_daily.sh"
 FORECAST_PAGE = FORECAST_DIR / "web" / "index.html"
+REBATE_SNAPSHOT_FILE = REPO_DIR / "data" / "rebate_monitor_snapshot.json"
+REBATE_MONITOR_PAUSED = True
 
 
 def refresh_forecast():
@@ -968,6 +970,19 @@ def build_rebate_monitor_data(records, start_ds="20260814"):
     )
     return result
 
+
+def load_rebate_monitor_data(records):
+    """Keep the rebate monitor frozen while the source has no new rebate data."""
+    if REBATE_MONITOR_PAUSED and REBATE_SNAPSHOT_FILE.exists():
+        result = json.loads(REBATE_SNAPSHOT_FILE.read_text(encoding="utf-8"))
+        result["paused"] = True
+        result["paused_note"] = "近期无新增返点信息，返点后监测已暂停更新"
+        dates = result.get("dates") or []
+        frozen_through = dates[-1] if dates else "未知日期"
+        print(f"  [返点后] 暂停更新，沿用冻结快照至 {frozen_through}")
+        return result
+    return build_rebate_monitor_data(records)
+
 # ─── 日期窗口 ─────────────────────────────────────────────────────────────────
 def get_all_dates(records):
     return sorted({r["ds"] for r in records if str(r.get("ds", "")).isdigit()})
@@ -1518,7 +1533,7 @@ canvas{{max-height:340px}}
   <div class="tab" onclick="switchTab('country')">国家视图</div>
   <div class="tab" onclick="switchTab('dau')">DAU成本</div>
   <div class="tab" onclick="switchTab('dac')">DAC成本</div>
-  <div class="tab" onclick="switchTab('rebate')">返点后监测</div>
+  <div class="tab" onclick="switchTab('rebate')">返点后监测（暂停）</div>
   <div class="tab" onclick="switchTab('forecast')">ROI预测</div>
   <div class="period-bar">
     <button class="pbtn" data-period="7" onclick="setPeriod(7)">过去 7 天</button>
@@ -2714,7 +2729,7 @@ function renderRebate() {{
 
   const note = document.getElementById("rebate-range-note");
   if (note) note.textContent = d.dates.length
-    ? `${{dsToInput(d.dates[0])}} 至 ${{dsToInput(d.dates[d.dates.length-1])}} · 支出口径：costdsp返点后 · 数据最早从 2026-08-14 开始`
+    ? `${{dsToInput(d.dates[0])}} 至 ${{dsToInput(d.dates[d.dates.length-1])}} · 支出口径：costdsp返点后${{d.paused ? " · 暂停更新：近期无新增返点信息" : ""}}`
     : "当前日期筛选范围内暂无返点后数据（数据最早从 2026-08-14 开始）";
 
   const dacSpend = dacCampaigns.reduce((sum, [, e]) => sum + Number(e.spend || 0), 0);
@@ -3196,7 +3211,7 @@ def main():
     data         = build_data(records)
     dac_data     = build_dac_data(records)
     dau_cost_data = build_dau_cost_data(records)
-    rebate_data  = build_rebate_monitor_data(records)
+    rebate_data  = load_rebate_monitor_data(records)
     all_signals, overall_roi = compute_all_signals(records)
 
     data_json        = json.dumps(data,        ensure_ascii=False)
@@ -3226,7 +3241,8 @@ def main():
         return
     repo = str(REPO_DIR)
     try:
-        subprocess.run(["git", "-C", repo, "add", "index.html", "generate_dashboard.py"],
+        subprocess.run(["git", "-C", repo, "add", "index.html", "generate_dashboard.py",
+                        "data/rebate_monitor_snapshot.json"],
                        check=True, capture_output=True)
         msg = f"data: {datetime.now().strftime('%m/%d')} update"
         result = subprocess.run(["git", "-C", repo, "diff", "--cached", "--quiet"])
