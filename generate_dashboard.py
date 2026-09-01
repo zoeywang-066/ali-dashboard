@@ -29,10 +29,14 @@ FORECAST_RUNNER = FORECAST_DIR / "run_daily.sh"
 FORECAST_PAGE = FORECAST_DIR / "web" / "index.html"
 REBATE_SNAPSHOT_FILE = REPO_DIR / "data" / "rebate_monitor_snapshot.json"
 REBATE_MONITOR_PAUSED = True
+ROI_FORECAST_PAUSED = True
 
 
 def refresh_forecast():
     """用最新客户数据重跑预测；失败时保留上一版预测，不中断主看板。"""
+    if ROI_FORECAST_PAUSED:
+        print("  (ROI / DAC 预测已暂停：沿用现有预测快照)")
+        return
     if "--skip-forecast" in sys.argv:
         print("  (--skip-forecast：沿用现有预测快照)")
         return
@@ -1534,7 +1538,7 @@ canvas{{max-height:340px}}
   <div class="tab" onclick="switchTab('dau')">DAU成本</div>
   <div class="tab" onclick="switchTab('dac')">DAC成本</div>
   <div class="tab" onclick="switchTab('rebate')">返点后监测（暂停）</div>
-  <div class="tab" onclick="switchTab('forecast')">ROI预测</div>
+  <div class="tab" onclick="switchTab('forecast')">ROI预测（暂停）</div>
   <div class="period-bar">
     <button class="pbtn" data-period="7" onclick="setPeriod(7)">过去 7 天</button>
     <button class="pbtn active" data-period="14" onclick="setPeriod(14)">过去 14 天</button>
@@ -1708,6 +1712,7 @@ canvas{{max-height:340px}}
 
 <!-- ══ ROI预测 面板 ══ -->
 <div id="panel-forecast" class="panel">
+  <div class="rebate-scope">暂停更新：保留最后一次预测快照；下次大规模预算增加时再恢复。</div>
   <iframe id="forecast-frame" class="forecast-frame" title="阿里24H ROI与DAC成本预测"
     srcdoc="{forecast_srcdoc}" onload="resizeForecastFrame()"></iframe>
 </div>
