@@ -28,8 +28,8 @@ FORECAST_DIR = Path.home() / "ali-analysis" / "roi-forecast"
 FORECAST_RUNNER = FORECAST_DIR / "run_daily.sh"
 FORECAST_PAGE = FORECAST_DIR / "web" / "index.html"
 REBATE_SNAPSHOT_FILE = REPO_DIR / "data" / "rebate_monitor_snapshot.json"
-REBATE_MONITOR_PAUSED = True
-ROI_FORECAST_PAUSED = True
+REBATE_MONITOR_PAUSED = False
+ROI_FORECAST_PAUSED = False
 
 
 def refresh_forecast():
@@ -1537,8 +1537,8 @@ canvas{{max-height:340px}}
   <div class="tab" onclick="switchTab('country')">国家视图</div>
   <div class="tab" onclick="switchTab('dau')">DAU成本</div>
   <div class="tab" onclick="switchTab('dac')">DAC成本</div>
-  <div class="tab" onclick="switchTab('rebate')">返点后监测（暂停）</div>
-  <div class="tab" onclick="switchTab('forecast')">ROI预测（暂停）</div>
+  <div class="tab" onclick="switchTab('rebate')">返点后监测</div>
+  <div class="tab" onclick="switchTab('forecast')">ROI预测</div>
   <div class="period-bar">
     <button class="pbtn" data-period="7" onclick="setPeriod(7)">过去 7 天</button>
     <button class="pbtn active" data-period="14" onclick="setPeriod(14)">过去 14 天</button>
@@ -1712,7 +1712,7 @@ canvas{{max-height:340px}}
 
 <!-- ══ ROI预测 面板 ══ -->
 <div id="panel-forecast" class="panel">
-  <div class="rebate-scope">暂停更新：保留最后一次预测快照；下次大规模预算增加时再恢复。</div>
+  <div class="rebate-scope">已恢复更新：根据最新客户24H ROI与平台D1信号，自动校正国家和Campaign预测。</div>
   <iframe id="forecast-frame" class="forecast-frame" title="阿里24H ROI与DAC成本预测"
     srcdoc="{forecast_srcdoc}" onload="resizeForecastFrame()"></iframe>
 </div>
