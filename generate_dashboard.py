@@ -21,6 +21,7 @@ XLSX_FILE    = DOWNLOADS / "aliexpress_moloco_compaign_data.xlsx"
 CSV_FILE     = DOWNLOADS / "aliexpress_moloco_compaign_data.csv"
 NUMBERS_FILE = DOWNLOADS / "阿里投放数据.numbers"
 SHEET_NAME   = "最新"
+REPLACEMENT_SHEET_NAME = "代替"
 HISTORY_FILE = REPO_DIR / "data" / "ae_history_20251001_20260111.csv"
 HISTORY_START = "20251001"
 HISTORY_END   = "20260111"
@@ -185,7 +186,7 @@ def load_data():
 HEADER_KEYWORDS = {
     "ds", "统计时间", "campaign_name", "campaign_namedsp", "campaign_id",
     "花费", "cost", "costdsp", "costdsp返点后", "24h_dac", "session_dac", "session_dau", "dac成本",
-    "24h-gmvroi", "24h_gmvroi", "sess-gmvroi",
+    "24h-gmv", "24h-gmvroi", "24h_gmvroi", "24hgmvroi", "24hdac成本", "sess-gmvroi",
 }
 
 def _norm_col(name):
@@ -305,10 +306,10 @@ def _resolve_gmv_roi_cols(raw, h_i, end_i, cm, spend_i):
     roi_i = _find_col(cm, ["24h-gmvroi", "24h_gmvroi", "24h_roi", "sess-gmvroi"])
     return gmv_i, roi_i, None
 
-def _load_xlsx(path):
+def _load_xlsx_sheet(path, sheet_name):
     import pandas as pd
-    print(f"读取 xlsx: {path.name}  sheet={SHEET_NAME}")
-    raw = pd.read_excel(path, sheet_name=SHEET_NAME, dtype=str, header=None)
+    print(f"读取 xlsx: {path.name}  sheet={sheet_name}")
+    raw = pd.read_excel(path, sheet_name=sheet_name, dtype=str, header=None)
 
     # 找出所有 header 行（首列值为 'ds'）
     header_idxs = [i for i, row in raw.iterrows()
@@ -320,16 +321,16 @@ def _load_xlsx(path):
     print(f"  检测到 {len(header_idxs)} 个数据段")
 
     REQUIRED_FIELDS = {
-        "spend(花费/costdsp)":         ["花费", "costdsp"],
+        "spend(花费/costdsp)":         ["花费", "cost", "costdsp", "spend"],
         "campaign_name":               ["campaign_name", "campaign_namedsp"],
         "campaign_id":                 ["campaign_id"],
     }
     OPTIONAL_FIELDS = {
-        "dau(session_dau)":            ["session_dau"],
-        "dac(24h_dac/session_dac)":    ["24h_dac", "session_dac"],
-        "dac_cost":                    ["dac成本"],
-        "roi(24h/sess gmvroi)":        ["24h-gmvroi", "24h_gmvroi", "sess-gmvroi"],
-        "gmv(24h_gmv/shifted)":        ["24h_gmv", "24h-gmvroi", "24h_gmvroi"],
+        "dau(session_dau)":            ["session_dau", "会员DAU"],
+        "dac(24h_dac/session_dac)":    ["24h_dac", "session_dac", "dac"],
+        "dac_cost":                    ["dac成本", "24hdac成本", "24h_dac成本"],
+        "roi(24h/sess gmvroi)":        ["24h-gmvroi", "24h_gmvroi", "24hgmvroi", "sess-gmvroi"],
+        "gmv(24h_gmv/shifted)":        ["24h_gmv", "24h-gmv", "24hgmv", "24h-gmvroi", "24h_gmvroi"],
     }
 
     all_records = []
@@ -365,8 +366,8 @@ def _load_xlsx(path):
         # DAC列：优先 24h_dac（新格式），其次 session_dac
         dac_i      = _find_col(cm, ["24h_dac", "session_dac", "dac"])
         # dac成本：新格式直接提供
-        dac_cost_i = _find_col(cm, ["dac成本"])
-        dau_i      = _find_col(cm, ["session_dau", "session dau", "dau"])
+        dac_cost_i = _find_col(cm, ["dac成本", "24hdac成本", "24h_dac成本"])
+        dau_i      = _find_col(cm, ["session_dau", "session dau", "dau", "会员DAU"])
         name_i     = _find_col(cm, ["campaign_name", "campaign_namedsp"])
         cid_i      = _find_col(cm, ["campaign_id"])
         geo_i      = _find_col(cm, ["geo type", "geo_type", "country", "country_code"])
@@ -462,6 +463,34 @@ def _load_xlsx(path):
 
     print(f"加载 {len(all_records)} 行数据")
     return all_records
+
+def _load_xlsx(path):
+    import pandas as pd
+
+    current_records = _load_xlsx_sheet(path, SHEET_NAME)
+    sheet_names = pd.ExcelFile(path).sheet_names
+    if REPLACEMENT_SHEET_NAME not in sheet_names:
+        return current_records
+
+    replacement_records = _load_xlsx_sheet(path, REPLACEMENT_SHEET_NAME)
+    if not replacement_records:
+        return current_records
+
+    def identity(record):
+        ds = str(record.get("ds") or "")
+        cid = str(record.get("cid") or "").strip()
+        name = str(record.get("name") or "").strip()
+        return (ds, f"cid:{cid}" if cid else f"name:{name}")
+
+    replacement_keys = {identity(record) for record in replacement_records}
+    merged = [record for record in current_records if identity(record) not in replacement_keys]
+    merged.extend(replacement_records)
+    replacement_dates = sorted({record.get("ds") for record in replacement_records if record.get("ds")})
+    print(
+        f"  代替 sheet 覆盖: {len(replacement_records)} 行 · "
+        f"日期 {', '.join(replacement_dates)} · 合并后 {len(merged)} 行"
+    )
+    return merged
 
 def _load_csv(path):
     import pandas as pd
