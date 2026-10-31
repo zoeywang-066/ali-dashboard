@@ -175,6 +175,8 @@ def load_data():
     else:
         print(f"  未找到历史 AE数据文件，跳过: {HISTORY_FILE}")
 
+    records = _apply_replacement_moloco_spend(records)
+
     before = len(records)
     excluded = {r["name"] for r in records if is_other_channel(r["name"])}
     records = [r for r in records if not is_other_channel(r["name"])]
@@ -413,7 +415,11 @@ def _load_xlsx_sheet(path, sheet_name):
                 cid   = _gv(row, cid_i) or ""
                 geo   = _gv(row, geo_i) or ""
                 spend = _tf(spend_raw) or 0.0
-                rebate_spend = _tf(_gv(row, rebate_spend_i)) if rebate_spend_i is not None else None
+                is_replacement = sheet_name == REPLACEMENT_SHEET_NAME
+                rebate_spend = (
+                    spend if is_replacement
+                    else (_tf(_gv(row, rebate_spend_i)) if rebate_spend_i is not None else None)
+                )
                 source_roi = _tf(_gv(row, roi_i))
                 gmv   = _tf(_gv(row, gmv_i))   # 24h_gmv 金额，用于所有层级聚合 ROI = Σgmv/Σcostdsp
                 rebate_roi = (gmv / rebate_spend) if (gmv is not None and rebate_spend and rebate_spend > 0) else None
@@ -426,6 +432,7 @@ def _load_xlsx_sheet(path, sheet_name):
                     "ds": ds_raw, "name": name, "cid": cid,
                     "spend": spend, "roi": roi, "source_roi": source_roi, "gmv": gmv, "dac": dac, "dac_cost": dac_cost,
                     "dau": dau, "geo": geo, "rebate_spend": rebate_spend, "rebate_roi": rebate_roi,
+                    "roi_spend": spend, "source_sheet": sheet_name,
                 })
                 sec_parsed += 1
             except Exception as e:
@@ -491,6 +498,81 @@ def _load_xlsx(path):
         f"日期 {', '.join(replacement_dates)} · 合并后 {len(merged)} 行"
     )
     return merged
+
+
+def _apply_replacement_moloco_spend(records, source_path=None):
+    """Use Moloco local-date spend for normal metrics; keep sheet cost as rebate spend."""
+    replacement_rows = [r for r in records if r.get("source_sheet") == REPLACEMENT_SHEET_NAME]
+    if not replacement_rows:
+        return records
+
+    if source_path is None:
+        candidates = sorted(
+            Path("/private/tmp").glob("ali_roi_forecast_d1_*.csv"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        if not candidates:
+            print("  [警告] 未找到 Moloco local-date 消耗文件，代替 sheet 暂用抵扣后 cost 展示")
+            return records
+        source_path = candidates[0]
+    else:
+        source_path = Path(source_path)
+
+    import csv
+
+    lookup = defaultdict(lambda: {"spend": 0.0, "name": "", "geo": ""})
+    with source_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        nonblank_lines = (line for line in handle if line.strip())
+        for row in csv.DictReader(nonblank_lines):
+            ds = str(row.get("date_local") or "").replace("-", "")
+            cid = str(row.get("campaign_id") or "").strip()
+            spend = _to_float(row.get("spend_usd"))
+            if len(ds) == 8 and cid and spend is not None:
+                item = lookup[(ds, cid)]
+                item["spend"] += spend
+                item["name"] = str(row.get("campaign_name") or item["name"])
+                item["geo"] = str(row.get("country") or item["geo"])
+
+    matched = 0
+    for record in replacement_rows:
+        net_cost = float(record.get("roi_spend") or record.get("spend") or 0)
+        record["roi_spend"] = net_cost
+        record["rebate_spend"] = net_cost
+        item = lookup.get((str(record.get("ds") or ""), str(record.get("cid") or "").strip()))
+        if item is not None:
+            raw_spend = item["spend"]
+            record["spend"] = raw_spend
+            record["roi_spend"] = raw_spend
+            gmv = record.get("gmv")
+            if gmv is not None and raw_spend > 0:
+                record["roi"] = gmv / raw_spend
+            matched += 1
+
+    replacement_dates = {str(record.get("ds") or "") for record in replacement_rows}
+    existing_keys = {
+        (str(record.get("ds") or ""), str(record.get("cid") or "").strip())
+        for record in replacement_rows
+    }
+    moloco_only = 0
+    for (ds, cid), item in lookup.items():
+        if ds not in replacement_dates or (ds, cid) in existing_keys or item["spend"] <= 0:
+            continue
+        records.append({
+            "ds": ds, "name": item["name"], "cid": cid,
+            "spend": item["spend"], "roi_spend": item["spend"],
+            "roi": 0.0, "source_roi": None, "gmv": 0.0,
+            "dac": 0.0, "dac_cost": None, "dau": 0.0, "geo": item["geo"],
+            "rebate_spend": None, "rebate_roi": None, "source_sheet": "moloco_local_date",
+        })
+        moloco_only += 1
+
+    print(
+        f"  代替 sheet 消耗口径: {matched}/{len(replacement_rows)} 行使用 Moloco local date 实际消耗 · "
+        f"新增 {moloco_only} 行仅Moloco有消耗的campaign · "
+        f"普通ROI/DAC成本使用实际消耗，抵扣后监测保留 sheet cost · {source_path.name}"
+    )
+    return records
 
 def _load_csv(path):
     import pandas as pd
@@ -682,16 +764,17 @@ def build_dac_data(records):
                 continue
             _, label = classify(r["name"], r.get("geo"))
             sn = short_name(r["name"])
-            c_daily[label][r["ds"]]["cost"] += r["spend"]
+            metric_spend = r.get("roi_spend", r["spend"])
+            c_daily[label][r["ds"]]["cost"] += metric_spend
             c_daily[label][r["ds"]]["dac"]  += r.get("dac") or 0
-            c_camp[label][sn][r["ds"]]["cost"] += r["spend"]
+            c_camp[label][sn][r["ds"]]["cost"] += metric_spend
             c_camp[label][sn][r["ds"]]["dac"]  += r.get("dac") or 0
             # DAC 专项独立聚合（不影响国家口径）
             if "DAC专项" in (r.get("name") or ""):
-                sp_overall[r["ds"]]["cost"] += r["spend"]
+                sp_overall[r["ds"]]["cost"] += metric_spend
                 sp_overall[r["ds"]]["dac"]  += r.get("dac") or 0
                 sp_overall[r["ds"]]["gmv"]  += r.get("gmv") or 0
-                sp_camp[sn][r["ds"]]["cost"] += r["spend"]
+                sp_camp[sn][r["ds"]]["cost"] += metric_spend
                 sp_camp[sn][r["ds"]]["dac"]  += r.get("dac") or 0
                 sp_camp[sn][r["ds"]]["gmv"]  += r.get("gmv") or 0
 
@@ -824,7 +907,7 @@ def build_dau_cost_data(records):
         if r["ds"] not in date_set:
             continue
         dau = r.get("dau") or 0
-        spend = r.get("spend") or 0
+        spend = r.get("roi_spend", r.get("spend") or 0)
         if dau <= 0 or spend <= 0:
             continue
         _, label = classify(r["name"], r.get("geo"))
@@ -1030,9 +1113,9 @@ def get_window(records, n):
 # ─── 聚合 ────────────────────────────────────────────────────────────────────
 def aggregate(records, dates):
     date_set    = set(dates)
-    proj_agg    = defaultdict(lambda: defaultdict(lambda: {"spend":0,"gmv":0}))
-    country_agg = defaultdict(lambda: defaultdict(lambda: {"spend":0,"gmv":0}))
-    camp_agg    = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: {"spend":0,"gmv":0,"rebate_spend":0})))
+    proj_agg    = defaultdict(lambda: defaultdict(lambda: {"spend":0,"roi_spend":0,"gmv":0}))
+    country_agg = defaultdict(lambda: defaultdict(lambda: {"spend":0,"roi_spend":0,"gmv":0}))
+    camp_agg    = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: {"spend":0,"roi_spend":0,"gmv":0,"rebate_spend":0})))
     camp_display_names = {}
     rebate_roi_groups = {"JBP", "欧洲本地"}
 
@@ -1049,6 +1132,7 @@ def aggregate(records, dates):
         target = proj_agg[label] if kind == "project" else country_agg[label]
         b = target[r["ds"]]
         b["spend"] += r["spend"]
+        b["roi_spend"] += r.get("roi_spend", r["spend"])
         b["gmv"]   += (r.get("gmv") or 0)          # 项目/国家聚合 ROI = Σ24h_gmv / Σ花费
         cid = str(r.get("cid") or "").strip()
         sn = short_name(r["name"]) or cid or "未知 campaign"
@@ -1060,6 +1144,7 @@ def aggregate(records, dates):
             camp_display_names[display_key] = {"ds": str(r["ds"]), "row_i": row_i, "name": sn}
         cb = camp_agg[label][camp_key][r["ds"]]
         cb["spend"] += r["spend"]
+        cb["roi_spend"] += r.get("roi_spend", r["spend"])
         cb["gmv"]   += (r.get("gmv") or 0)                  # 单 campaign 同样用 Σ24h_gmv / Σcostdsp
         if r.get("rebate_spend") and r["rebate_spend"] > 0:
             cb["rebate_spend"] += r["rebate_spend"]
@@ -1069,11 +1154,12 @@ def aggregate(records, dates):
         for label, ds_map in agg_dict.items():
             spend_list, roi_list, gmv_list = [], [], []
             for d in dates:
-                b = ds_map.get(d, {"spend":0,"gmv":0})
+                b = ds_map.get(d, {"spend":0,"roi_spend":0,"gmv":0})
                 sp = round(b["spend"], 2); gm = round(b.get("gmv", 0), 2)
                 spend_list.append(sp); gmv_list.append(gm)
                 # 当日聚合 ROI = 当日 Σ24h_gmv / 当日 Σ花费
-                roi_list.append(round(gm / b["spend"], 2) if b["spend"] > 0 else None)
+                roi_spend = b.get("roi_spend", b["spend"])
+                roi_list.append(round(gm / roi_spend, 2) if roi_spend > 0 else None)
             if sum(s for s in spend_list if s) > 0:
                 result[label] = {"spend": spend_list, "roi": roi_list, "gmv": gmv_list}
         return result
@@ -1086,9 +1172,10 @@ def aggregate(records, dates):
             for camp_key, ds_map in camp_map.items():
                 spend_list, roi_list, rebate_roi_list = [], [], []
                 for d in dates:
-                    b = ds_map.get(d, {"spend":0,"gmv":0,"rebate_spend":0})
+                    b = ds_map.get(d, {"spend":0,"roi_spend":0,"gmv":0,"rebate_spend":0})
                     spend_list.append(round(b["spend"], 2))
-                    roi_list.append(round(b["gmv"]/b["spend"], 2) if b["spend"] > 0 else None)
+                    roi_spend = b.get("roi_spend", b["spend"])
+                    roi_list.append(round(b["gmv"]/roi_spend, 2) if roi_spend > 0 else None)
                     rebate_roi_list.append(
                         round(b["gmv"]/b["rebate_spend"], 2)
                         if rebate_roi_applicable(group, d) and b.get("rebate_spend", 0) > 0
@@ -1112,13 +1199,14 @@ def aggregate(records, dates):
 
 def build_platform_series(records, dates):
     date_set = set(dates)
-    daily = defaultdict(lambda: {"spend": 0.0, "gmv": 0.0, "gmv_rows": 0})
+    daily = defaultdict(lambda: {"spend": 0.0, "roi_spend": 0.0, "gmv": 0.0, "gmv_rows": 0})
 
     for r in records:
         if r["ds"] not in date_set:
             continue
         b = daily[r["ds"]]
         b["spend"] += r["spend"]
+        b["roi_spend"] += r.get("roi_spend", r["spend"])
         gmv = r.get("gmv")
         if gmv is not None:
             b["gmv"] += gmv
@@ -1126,14 +1214,16 @@ def build_platform_series(records, dates):
 
     spend_list, gmv_list, roi_list = [], [], []
     for d in dates:
-        b = daily.get(d, {"spend": 0.0, "gmv": 0.0, "gmv_rows": 0})
+        b = daily.get(d, {"spend": 0.0, "roi_spend": 0.0, "gmv": 0.0, "gmv_rows": 0})
         spend = round(b["spend"], 2)
+        roi_spend = round(b.get("roi_spend", b["spend"]), 2)
         gmv = round(b["gmv"], 2)
         spend_list.append(spend)
         gmv_list.append(gmv)
-        roi_list.append(round(gmv / spend, 2) if spend > 0 and b["gmv_rows"] > 0 else None)
+        roi_list.append(round(gmv / roi_spend, 2) if roi_spend > 0 and b["gmv_rows"] > 0 else None)
 
     total_spend = sum(spend_list)
+    total_roi_spend = sum(b.get("roi_spend", b["spend"]) for b in daily.values())
     total_gmv = sum(gmv_list)
     total_gmv_rows = sum(b["gmv_rows"] for b in daily.values())
     return {
@@ -1143,7 +1233,7 @@ def build_platform_series(records, dates):
         "summary": {
             "spend": round(total_spend, 0),
             "gmv": round(total_gmv, 0),
-            "roi": round(total_gmv / total_spend, 2) if total_spend > 0 and total_gmv_rows > 0 else None,
+            "roi": round(total_gmv / total_roi_spend, 2) if total_roi_spend > 0 and total_gmv_rows > 0 else None,
         },
     }
 
@@ -1175,14 +1265,16 @@ def _compute_signals_for_window(records, compare_days):
         for key in (label, camp_key):
             if r["ds"] in recent_dates:
                 agg[key]["r_spend"] += r["spend"]
-                if r["roi"] and r["roi"]>0 and r["spend"]>0:
-                    agg[key]["r_ws"]  += r["spend"]
-                    agg[key]["r_wsr"] += r["roi"] * r["spend"]
+                roi_spend = r.get("roi_spend", r["spend"])
+                if r["roi"] and r["roi"]>0 and roi_spend>0:
+                    agg[key]["r_ws"]  += roi_spend
+                    agg[key]["r_wsr"] += r["roi"] * roi_spend
             elif r["ds"] in prev_dates:
                 agg[key]["p_spend"] += r["spend"]
-                if r["roi"] and r["roi"]>0 and r["spend"]>0:
-                    agg[key]["p_ws"]  += r["spend"]
-                    agg[key]["p_wsr"] += r["roi"] * r["spend"]
+                roi_spend = r.get("roi_spend", r["spend"])
+                if r["roi"] and r["roi"]>0 and roi_spend>0:
+                    agg[key]["p_ws"]  += roi_spend
+                    agg[key]["p_wsr"] += r["roi"] * roi_spend
 
     grp_ws  = sum(b["r_ws"]  for k,b in agg.items() if "|||" not in k)
     grp_wsr = sum(b["r_wsr"] for k,b in agg.items() if "|||" not in k)
@@ -1193,9 +1285,10 @@ def _compute_signals_for_window(records, compare_days):
     for r in records:
         if r["ds"] not in recent_dates: continue
         _, label = classify(r["name"], r.get("geo"))
-        if r["roi"] and r["roi"]>0 and r["spend"]>0:
-            daily_roi[label][r["ds"]]["ws"]  += r["spend"]
-            daily_roi[label][r["ds"]]["wsr"] += r["roi"] * r["spend"]
+        roi_spend = r.get("roi_spend", r["spend"])
+        if r["roi"] and r["roi"]>0 and roi_spend>0:
+            daily_roi[label][r["ds"]]["ws"]  += roi_spend
+            daily_roi[label][r["ds"]]["wsr"] += r["roi"] * roi_spend
 
     def daily_cv(label):
         vals = [b["wsr"]/b["ws"] for b in daily_roi[label].values() if b["ws"]>0]
@@ -1586,9 +1679,9 @@ canvas{{max-height:340px}}
   <div id="kpi-bar" class="kpi-bar"></div>
   <div class="chart-box">
     <div class="chart-hd">整体平台消耗（柱）& ROI（线）趋势
-      <span class="badge">左轴: costdsp USD · 右轴: ROI · Σ24h_gmv / Σcostdsp</span></div>
+      <span class="badge">左轴: Moloco local date消耗 · 右轴: 未抵扣ROI</span></div>
     <canvas id="platformRoiChart"></canvas>
-    <div class="note">整体平台维度：按天汇总所有 Moloco campaign 的 costdsp 与 24h_gmv</div>
+    <div class="note">整体平台维度：消耗取Moloco local date实际值；ROI = Σ24h_gmv / Σ实际消耗。抵扣后cost仅用于返点后监测。</div>
   </div>
   <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">
     <span style="font-size:13px;color:#64748b;font-weight:500">信号对比：</span>
