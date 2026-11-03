@@ -474,8 +474,17 @@ def _load_xlsx_sheet(path, sheet_name):
 def _load_xlsx(path):
     import pandas as pd
 
-    current_records = _load_xlsx_sheet(path, SHEET_NAME)
     sheet_names = pd.ExcelFile(path).sheet_names
+    if SHEET_NAME in sheet_names:
+        current_sheet = SHEET_NAME
+    elif "Moloco分campaign明细" in sheet_names:
+        current_sheet = "Moloco分campaign明细"
+        print(f"  当前数据 sheet: {current_sheet}（兼容新下载表名称）")
+    else:
+        current_sheet = sheet_names[0]
+        print(f"  [警告] 未找到 {SHEET_NAME}，改用首个 sheet: {current_sheet}")
+
+    current_records = _load_xlsx_sheet(path, current_sheet)
     if REPLACEMENT_SHEET_NAME not in sheet_names:
         return current_records
 
