@@ -175,7 +175,7 @@ def load_data():
     else:
         print(f"  未找到历史 AE数据文件，跳过: {HISTORY_FILE}")
 
-    records = _apply_replacement_moloco_spend(records)
+    records = _apply_moloco_local_spend(records)
 
     before = len(records)
     excluded = {r["name"] for r in records if is_other_channel(r["name"])}
@@ -219,16 +219,23 @@ def _to_float(v):
         return None
 
 def _merge_records(*record_sets):
-    """合并历史和当前数据；同一日期/campaign/name 重叠时，后传入的数据优先。"""
-    merged = {}
-    order = []
+    """Merge sources while preserving multi-country detail rows within each source."""
+    merged = []
+
+    def identity(record):
+        return (
+            record.get("ds"),
+            str(record.get("cid") or ""),
+            str(record.get("name") or ""),
+        )
+
     for records in record_sets:
-        for r in records:
-            key = (r.get("ds"), str(r.get("cid") or ""), str(r.get("name") or ""))
-            if key not in merged:
-                order.append(key)
-            merged[key] = r
-    return [merged[k] for k in order if k in merged]
+        incoming = list(records)
+        incoming_keys = {identity(record) for record in incoming}
+        if incoming_keys:
+            merged = [record for record in merged if identity(record) not in incoming_keys]
+        merged.extend(incoming)
+    return merged
 
 def _resolve_gmv_roi_cols(raw, h_i, end_i, cm, spend_i):
     """每个数据段独立识别 GMV/ROI 列，防止同一 sheet 中表头位置变化或错位。"""
@@ -509,10 +516,13 @@ def _load_xlsx(path):
     return merged
 
 
-def _apply_replacement_moloco_spend(records, source_path=None):
-    """Use Moloco local-date spend for normal metrics; keep sheet cost as rebate spend."""
-    replacement_rows = [r for r in records if r.get("source_sheet") == REPLACEMENT_SHEET_NAME]
-    if not replacement_rows:
+def _apply_moloco_local_spend(records, source_path=None):
+    """Use Moloco local-date spend for normal metrics and sheet cost for rebate monitoring."""
+    sheet_rows = [
+        r for r in records
+        if r.get("source_sheet") and r.get("source_sheet") != "moloco_local_date"
+    ]
+    if not sheet_rows:
         return records
 
     if source_path is None:
@@ -522,7 +532,7 @@ def _apply_replacement_moloco_spend(records, source_path=None):
             reverse=True,
         )
         if not candidates:
-            print("  [警告] 未找到 Moloco local-date 消耗文件，代替 sheet 暂用抵扣后 cost 展示")
+            print("  [警告] 未找到 Moloco local-date 消耗文件，首页无法切换为实际消耗")
             return records
         source_path = candidates[0]
     else:
@@ -543,29 +553,49 @@ def _apply_replacement_moloco_spend(records, source_path=None):
                 item["name"] = str(row.get("campaign_name") or item["name"])
                 item["geo"] = str(row.get("country") or item["geo"])
 
-    matched = 0
-    for record in replacement_rows:
-        net_cost = float(record.get("roi_spend") or record.get("spend") or 0)
-        record["roi_spend"] = net_cost
-        record["rebate_spend"] = net_cost
-        item = lookup.get((str(record.get("ds") or ""), str(record.get("cid") or "").strip()))
-        if item is not None:
-            raw_spend = item["spend"]
-            record["spend"] = raw_spend
-            record["roi_spend"] = raw_spend
-            gmv = record.get("gmv")
-            if gmv is not None and raw_spend > 0:
-                record["roi"] = gmv / raw_spend
-            matched += 1
+    # The downloaded sheet can split one campaign into several conversion-country rows.
+    # Preserve every row's GMV/DAC, but assign Moloco spend once per local-date campaign.
+    rows_by_key = defaultdict(list)
+    for record in sheet_rows:
+        sheet_cost = float(record.get("spend") or 0)
+        record["rebate_spend"] = sheet_cost
+        gmv = record.get("gmv")
+        record["rebate_roi"] = (
+            gmv / sheet_cost if gmv is not None and sheet_cost > 0 else None
+        )
+        key = (str(record.get("ds") or ""), str(record.get("cid") or "").strip())
+        if key[0] and key[1]:
+            rows_by_key[key].append(record)
 
-    replacement_dates = {str(record.get("ds") or "") for record in replacement_rows}
-    existing_keys = {
-        (str(record.get("ds") or ""), str(record.get("cid") or "").strip())
-        for record in replacement_rows
-    }
+    matched = 0
+    unmatched = 0
+    for key, group in rows_by_key.items():
+        item = lookup.get(key)
+        primary = max(group, key=lambda row: float(row.get("rebate_spend") or 0))
+        group_gmv = sum(float(row.get("gmv") or 0) for row in group)
+        for record in group:
+            record["spend"] = 0.0
+            record["roi_spend"] = 0.0
+            record["roi"] = None
+        if item is None:
+            unmatched += 1
+            continue
+        raw_spend = item["spend"]
+        primary["spend"] = raw_spend
+        primary["roi_spend"] = raw_spend
+        primary["roi"] = group_gmv / raw_spend if raw_spend > 0 else None
+        matched += 1
+
+    sheet_dates = {str(record.get("ds") or "") for record in sheet_rows}
+    existing_keys = set(rows_by_key)
     moloco_only = 0
     for (ds, cid), item in lookup.items():
-        if ds not in replacement_dates or (ds, cid) in existing_keys or item["spend"] <= 0:
+        if (
+            ds not in sheet_dates
+            or (ds, cid) in existing_keys
+            or item["spend"] <= 0
+            or "rmkt" not in item["name"].lower()
+        ):
             continue
         records.append({
             "ds": ds, "name": item["name"], "cid": cid,
@@ -577,9 +607,9 @@ def _apply_replacement_moloco_spend(records, source_path=None):
         moloco_only += 1
 
     print(
-        f"  代替 sheet 消耗口径: {matched}/{len(replacement_rows)} 行使用 Moloco local date 实际消耗 · "
-        f"新增 {moloco_only} 行仅Moloco有消耗的campaign · "
-        f"普通ROI/DAC成本使用实际消耗，抵扣后监测保留 sheet cost · {source_path.name}"
+        f"  普通看板消耗口径: {matched}/{len(rows_by_key)} 个日期×campaign使用Moloco local date实际消耗 · "
+        f"{unmatched} 个未匹配 · 新增 {moloco_only} 个仅Moloco有消耗的RE记录 · "
+        f"返点后监测保留sheet cost · {source_path.name}"
     )
     return records
 
@@ -1465,7 +1495,7 @@ def build_data(records):
 
         all_camp_ds = {g: make_camp_ds(gc) for g, gc in campaigns.items()}
         platform_ds = [
-            {"label": "平台消耗(costdsp)", "data": platform["spend"],
+            {"label": "平台消耗(Moloco local date)", "data": platform["spend"],
              "backgroundColor": "rgba(14,165,233,0.42)", "borderColor": "#0ea5e9",
              "borderWidth": 1, "yAxisID": "ySpend", "type": "bar", "stack": "spend"},
             {"label": "平台 ROI", "data": platform["roi"],
@@ -2359,7 +2389,7 @@ function renderHome() {{
       <div class="k-sub" style="color:#64748b">USD / 天</div></div>
     <div class="kpi"><div class="k-label">Moloco平台 ROI</div>
       <div class="k-val">${{platformRoi}}</div>
-      <div class="k-sub" style="color:#64748b">Σ24h_gmv / Σcostdsp</div></div>
+      <div class="k-sub" style="color:#64748b">Σ24h_gmv / ΣMoloco local date实际消耗</div></div>
     <div class="kpi red"><div class="k-label">需关注项</div>
       <div class="k-val">${{issues7.length}}</div>
       <div class="k-sub" style="color:#dc2626">ROI下滑 / 持续偏低</div></div>
@@ -2623,7 +2653,7 @@ function renderDauCost() {{
       <div class="chart-hd">${{selDauCountry}} — DAU成本日趋势
         <span class="badge">Σcost / Σsession_dau</span></div>
       <canvas id="dauTrendChart"></canvas>
-      <div class="note">按天汇总该国家 / 项目下所有 campaign 的 cost 与 session_dau</div>
+      <div class="note">按天汇总该国家 / 项目下所有 campaign 的 Moloco local date实际消耗与 session_dau</div>
     </div>
     <div class="chart-box">
       <div class="chart-hd">${{selDauCountry}} — Campaign DAU成本
@@ -2987,7 +3017,7 @@ function renderDac() {{
       <div class="chart-hd">${{selDacCountry}} — DAC成本日趋势
         <span class="badge">dac成本字段 · 24h_dac口径</span></div>
       <canvas id="dacTrendChart"></canvas>
-      <div class="note">数据来源：dac成本字段（costdsp / 24h_dac）</div>
+      <div class="note">DAC数取客户sheet；消耗取Moloco local date实际值</div>
     </div>
     <div class="chart-box">
       <div class="chart-hd">${{selDacCountry}} — Campaign DAC成本
