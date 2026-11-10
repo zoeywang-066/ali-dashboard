@@ -20,6 +20,7 @@ OUTPUT_FILE  = str(REPO_DIR / "index.html")
 XLSX_FILE    = DOWNLOADS / "aliexpress_moloco_compaign_data.xlsx"
 CSV_FILE     = DOWNLOADS / "aliexpress_moloco_compaign_data.csv"
 NUMBERS_FILE = DOWNLOADS / "阿里投放数据.numbers"
+SUPPLEMENTAL_XLSX_GLOB = "AE合作Moloco分campaign明细-*.xlsx"
 SHEET_NAME   = "最新"
 REPLACEMENT_SHEET_NAME = "代替"
 HISTORY_FILE = REPO_DIR / "data" / "ae_history_20251001_20260111.csv"
@@ -99,7 +100,11 @@ def normalize_country_label(label):
     s = str(label or "").strip().upper()
     if not s:
         return s
-    parts = [COUNTRY_ALIASES.get(p.strip(), p.strip()) for p in s.split("/") if p.strip()]
+    parts = []
+    for raw_part in s.split("/"):
+        part = re.sub(r"^\d+\s*[-_]\s*", "", raw_part.strip())
+        if part:
+            parts.append(COUNTRY_ALIASES.get(part, part))
     deduped = []
     for p in parts:
         if p not in deduped:
@@ -166,6 +171,20 @@ def load_data():
     else:
         print(f"错误：找不到数据文件\n  {XLSX_FILE}\n  {CSV_FILE}\n  {NUMBERS_FILE}")
         sys.exit(1)
+
+    supplemental_files = sorted(DOWNLOADS.glob(SUPPLEMENTAL_XLSX_GLOB))
+    if supplemental_files:
+        supplemental_path = supplemental_files[-1]
+        supplemental_records = _load_xlsx(supplemental_path)
+        before_merge = len(records)
+        records = _merge_records(records, supplemental_records)
+        supplemental_dates = sorted({r["ds"] for r in supplemental_records})
+        print(
+            f"  合并最新分campaign明细: {supplemental_path.name} · "
+            f"{supplemental_dates[0] if supplemental_dates else '?'}~"
+            f"{supplemental_dates[-1] if supplemental_dates else '?'} · "
+            f"{before_merge}+{len(supplemental_records)}→{len(records)} 行"
+        )
 
     current_count = len(records)
     if HISTORY_FILE.exists():
@@ -335,9 +354,9 @@ def _load_xlsx_sheet(path, sheet_name):
         "campaign_id":                 ["campaign_id"],
     }
     OPTIONAL_FIELDS = {
-        "dau(session_dau)":            ["session_dau", "会员DAU"],
-        "dac(24h_dac/session_dac)":    ["24h_dac", "session_dac", "dac"],
-        "dac_cost":                    ["dac成本", "24hdac成本", "24h_dac成本"],
+        "dau(session_dau)":            ["session_dau", "会员DAU", "site_mbr_uv"],
+        "dac(24h_dac/session_dac)":    ["24h_dac", "session_dac", "dac", "DAC"],
+        "dac_cost":                    ["dac成本", "DAC成本", "24hdac成本", "24h_dac成本"],
         "roi(24h/sess gmvroi)":        ["24h-gmvroi", "24h_gmvroi", "24hgmvroi", "sess-gmvroi"],
         "gmv(24h_gmv/shifted)":        ["24h_gmv", "24h-gmv", "24hgmv", "24h-gmvroi", "24h_gmvroi"],
     }
@@ -376,10 +395,10 @@ def _load_xlsx_sheet(path, sheet_name):
         dac_i      = _find_col(cm, ["24h_dac", "session_dac", "dac"])
         # dac成本：新格式直接提供
         dac_cost_i = _find_col(cm, ["dac成本", "24hdac成本", "24h_dac成本"])
-        dau_i      = _find_col(cm, ["session_dau", "session dau", "dau", "会员DAU"])
+        dau_i      = _find_col(cm, ["session_dau", "session dau", "dau", "会员DAU", "site_mbr_uv"])
         name_i     = _find_col(cm, ["campaign_name", "campaign_namedsp"])
         cid_i      = _find_col(cm, ["campaign_id"])
-        geo_i      = _find_col(cm, ["geo type", "geo_type", "country", "country_code"])
+        geo_i      = _find_col(cm, ["geo type", "geo_type", "country", "country_code", "国家DSP"])
 
         def _gv(row, idx):
             if idx is None: return None
