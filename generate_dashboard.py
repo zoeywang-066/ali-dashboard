@@ -173,8 +173,7 @@ def load_data():
         sys.exit(1)
 
     supplemental_files = sorted(DOWNLOADS.glob(SUPPLEMENTAL_XLSX_GLOB))
-    if supplemental_files:
-        supplemental_path = supplemental_files[-1]
+    for supplemental_path in supplemental_files:
         supplemental_records = _load_xlsx(supplemental_path)
         before_merge = len(records)
         records = _merge_records(records, supplemental_records)
@@ -242,11 +241,9 @@ def _merge_records(*record_sets):
     merged = []
 
     def identity(record):
-        return (
-            record.get("ds"),
-            str(record.get("cid") or ""),
-            str(record.get("name") or ""),
-        )
+        cid = str(record.get("cid") or "").strip()
+        name = str(record.get("name") or "").strip()
+        return (record.get("ds"), f"cid:{cid}" if cid else f"name:{name}")
 
     for records in record_sets:
         incoming = list(records)
