@@ -163,26 +163,35 @@ def short_name(name):
 def load_data():
     # 优先读取 xlsx，其次 csv，最后回落到 Numbers
     if XLSX_FILE.exists():
+        primary_path = XLSX_FILE
         records = _load_xlsx(XLSX_FILE)
     elif CSV_FILE.exists():
+        primary_path = CSV_FILE
         records = _load_csv(CSV_FILE)
     elif NUMBERS_FILE.exists():
+        primary_path = NUMBERS_FILE
         records = _load_numbers(NUMBERS_FILE)
     else:
         print(f"错误：找不到数据文件\n  {XLSX_FILE}\n  {CSV_FILE}\n  {NUMBERS_FILE}")
         sys.exit(1)
 
+    sources = [(primary_path.stat().st_mtime, primary_path.name, records)]
     supplemental_files = sorted(DOWNLOADS.glob(SUPPLEMENTAL_XLSX_GLOB))
     for supplemental_path in supplemental_files:
         supplemental_records = _load_xlsx(supplemental_path)
+        sources.append((supplemental_path.stat().st_mtime, supplemental_path.name, supplemental_records))
+
+    # A newly downloaded master workbook supersedes older rolling detail files.
+    records = []
+    for _, source_name, source_records in sorted(sources, key=lambda source: (source[0], source[1])):
         before_merge = len(records)
-        records = _merge_records(records, supplemental_records)
-        supplemental_dates = sorted({r["ds"] for r in supplemental_records})
+        records = _merge_records(records, source_records)
+        source_dates = sorted({r["ds"] for r in source_records})
         print(
-            f"  合并最新分campaign明细: {supplemental_path.name} · "
-            f"{supplemental_dates[0] if supplemental_dates else '?'}~"
-            f"{supplemental_dates[-1] if supplemental_dates else '?'} · "
-            f"{before_merge}+{len(supplemental_records)}→{len(records)} 行"
+            f"  按更新时间合并: {source_name} · "
+            f"{source_dates[0] if source_dates else '?'}~"
+            f"{source_dates[-1] if source_dates else '?'} · "
+            f"{before_merge}+{len(source_records)}→{len(records)} 行"
         )
 
     current_count = len(records)
@@ -574,10 +583,13 @@ def _apply_moloco_local_spend(records, source_path=None):
     rows_by_key = defaultdict(list)
     for record in sheet_rows:
         sheet_cost = float(record.get("spend") or 0)
-        record["rebate_spend"] = sheet_cost
+        rebate_cost = _to_float(record.get("rebate_spend"))
+        if rebate_cost is None:
+            rebate_cost = sheet_cost
+        record["rebate_spend"] = rebate_cost
         gmv = record.get("gmv")
         record["rebate_roi"] = (
-            gmv / sheet_cost if gmv is not None and sheet_cost > 0 else None
+            gmv / rebate_cost if gmv is not None and rebate_cost > 0 else None
         )
         key = (str(record.get("ds") or ""), str(record.get("cid") or "").strip())
         if key[0] and key[1]:
